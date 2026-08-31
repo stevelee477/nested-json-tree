@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.4
+
+- Added **Open raw JSON string (escaped) in new editor** for string nodes.
+
 ## 0.2.3
 
 - Added **Copy jq path** to the node context menu, including safe quoting for special key names.

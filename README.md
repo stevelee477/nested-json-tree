@@ -13,6 +13,7 @@ A VS Code viewer for JSON that is buried in logs, stored in JSONL, or encoded as
 - Opens the current JSONL/NDJSON line without parsing the rest as JSON.
 - Right-clicks any string node and chooses **Open as nested JSON tree**.
 - Copies either the decoded string value or its raw JSON literal form, preserving escapes such as `\\n`, `\\"`, and `\\\\`.
+- Opens the raw escaped JSON string literal in a new unsaved JSON editor, instead of only copying it.
 - Repeats nested-string decoding, so double-encoded JSON also works.
 - Copies a node's value, key, JSON path, or directly usable jq path from the tree context menu.
 - Rejects input files larger than 100 MB.
@@ -30,6 +31,7 @@ Set `nestedJsonTree.autoExpandMaxNodes` in VS Code Settings to change the automa
 3. Expand object and array nodes in the tree.
 4. Right-click a string value to open JSON encoded inside it in a new tree tab.
 5. Choose **Copy raw JSON string (escaped)** when you need the quoted JSON literal rather than decoded newlines or tabs.
+6. Choose **Open raw JSON string (escaped) in new editor** to inspect or save that literal as a separate JSON file.
 
 ## Development
 

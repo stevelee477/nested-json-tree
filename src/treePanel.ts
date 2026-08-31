@@ -9,7 +9,13 @@ export type CandidatePicker = (
 ) => Promise<JsonValue | undefined>;
 
 interface PanelMessage {
-  type: "ready" | "openNested" | "copy" | "copyEscapedString" | "copyJqPath";
+  type:
+    | "ready"
+    | "openNested"
+    | "openEscapedString"
+    | "copy"
+    | "copyEscapedString"
+    | "copyJqPath";
   value?: string;
   path?: Array<string | number>;
   text?: string;
@@ -64,6 +70,18 @@ export class JsonTreePanel {
 
     if (message.type === "copyEscapedString" && typeof message.value === "string") {
       await vscode.env.clipboard.writeText(encodeJsonStringLiteral(message.value));
+      return;
+    }
+
+    if (message.type === "openEscapedString" && typeof message.value === "string") {
+      const document = await vscode.workspace.openTextDocument({
+        content: encodeJsonStringLiteral(message.value),
+        language: "json",
+      });
+      await vscode.window.showTextDocument(document, {
+        preview: false,
+        viewColumn: vscode.ViewColumn.Beside,
+      });
       return;
     }
 
@@ -323,6 +341,7 @@ export class JsonTreePanel {
       menu.replaceChildren();
       if (typeof value === 'string') {
         addMenuItem('Open as nested JSON tree', () => vscode.postMessage({ type: 'openNested', value, path }));
+        addMenuItem('Open raw JSON string (escaped) in new editor', () => vscode.postMessage({ type: 'openEscapedString', value }));
         addSeparator();
         addMenuItem('Copy raw JSON string (escaped)', () => vscode.postMessage({ type: 'copyEscapedString', value }));
         addMenuItem('Copy decoded string value', () => vscode.postMessage({ type: 'copy', text: value }));
