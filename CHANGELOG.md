@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.3
+
+- Added **Copy jq path** to the node context menu, including safe quoting for special key names.
+
 ## 0.2.2
 
 - Empty object and array values are no longer shown as extracted JSON candidates.

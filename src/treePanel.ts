@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { JsonValue, encodeJsonStringLiteral, parseNestedJsonCandidates } from "./parser";
+import { formatJqPath } from "./paths";
 import { shouldAutoExpand } from "./treeOptions";
 
 export type CandidatePicker = (
@@ -8,7 +9,7 @@ export type CandidatePicker = (
 ) => Promise<JsonValue | undefined>;
 
 interface PanelMessage {
-  type: "ready" | "openNested" | "copy" | "copyEscapedString";
+  type: "ready" | "openNested" | "copy" | "copyEscapedString" | "copyJqPath";
   value?: string;
   path?: Array<string | number>;
   text?: string;
@@ -63,6 +64,11 @@ export class JsonTreePanel {
 
     if (message.type === "copyEscapedString" && typeof message.value === "string") {
       await vscode.env.clipboard.writeText(encodeJsonStringLiteral(message.value));
+      return;
+    }
+
+    if (message.type === "copyJqPath" && Array.isArray(message.path)) {
+      await vscode.env.clipboard.writeText(formatJqPath(message.path));
       return;
     }
 
@@ -326,6 +332,7 @@ export class JsonTreePanel {
       }
       if (path.length > 0) addMenuItem('Copy key', () => vscode.postMessage({ type: 'copy', text: String(key) }));
       addMenuItem('Copy JSON path', () => vscode.postMessage({ type: 'copy', text: formatPath(path) }));
+      addMenuItem('Copy jq path', () => vscode.postMessage({ type: 'copyJqPath', path }));
       menu.classList.remove('hidden');
       const rect = menu.getBoundingClientRect();
       menu.style.left = Math.max(4, Math.min(event.clientX, window.innerWidth - rect.width - 4)) + 'px';

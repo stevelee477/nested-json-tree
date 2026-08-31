@@ -14,7 +14,7 @@ A VS Code viewer for JSON that is buried in logs, stored in JSONL, or encoded as
 - Right-clicks any string node and chooses **Open as nested JSON tree**.
 - Copies either the decoded string value or its raw JSON literal form, preserving escapes such as `\\n`, `\\"`, and `\\\\`.
 - Repeats nested-string decoding, so double-encoded JSON also works.
-- Copies a node's value, key, or JSON path from the tree context menu.
+- Copies a node's value, key, JSON path, or directly usable jq path from the tree context menu.
 - Rejects input files larger than 100 MB.
 
 The viewer is read-only. This first version does not repair structurally broken JSON such as missing quotes or braces.
