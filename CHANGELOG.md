@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- Added one-click **Expand all** and **Collapse all** controls to every tree view.
+
 ## 0.2.0
 
 - Automatically expands trees containing at most 200 value nodes.

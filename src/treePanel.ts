@@ -119,6 +119,19 @@ export class JsonTreePanel {
     }
     .header-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .header-path { color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family); }
+    .header-actions { display: flex; gap: 4px; margin-left: auto; }
+    .header-button {
+      height: 26px;
+      padding: 0 9px;
+      border: 1px solid transparent;
+      border-radius: 3px;
+      color: var(--vscode-button-secondaryForeground);
+      background: var(--vscode-button-secondaryBackground);
+      font: inherit;
+      cursor: pointer;
+    }
+    .header-button:hover { background: var(--vscode-button-secondaryHoverBackground); }
+    .header-button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
     #tree { height: calc(100vh - 42px); padding: 8px 4px 24px 8px; overflow: auto; }
     .node { font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
     .row {
@@ -175,20 +188,36 @@ export class JsonTreePanel {
   </style>
 </head>
 <body>
-  <header><span class="header-title" id="title"></span><span class="header-path" id="path"></span></header>
+  <header>
+    <span class="header-title" id="title"></span>
+    <span class="header-path" id="path"></span>
+    <span class="header-actions">
+      <button class="header-button" id="expand-all" type="button" title="Expand every object and array">Expand all</button>
+      <button class="header-button" id="collapse-all" type="button" title="Collapse the entire tree">Collapse all</button>
+    </span>
+  </header>
   <main id="tree" role="tree"></main>
   <div id="menu" class="hidden" role="menu"></div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     const tree = document.getElementById('tree');
     const menu = document.getElementById('menu');
+    let rootNode;
 
     window.addEventListener('message', (event) => {
       const message = event.data;
       if (message.type !== 'render') return;
       document.getElementById('title').textContent = message.title;
       document.getElementById('path').textContent = message.pathLabel;
-      tree.replaceChildren(createNode('$', message.value, [], true, message.autoExpand));
+      rootNode = createNode('$', message.value, [], true, message.autoExpand);
+      tree.replaceChildren(rootNode);
+    });
+
+    document.getElementById('expand-all').addEventListener('click', () => {
+      if (rootNode && rootNode.setExpanded) rootNode.setExpanded(true, true);
+    });
+    document.getElementById('collapse-all').addEventListener('click', () => {
+      if (rootNode && rootNode.setExpanded) rootNode.setExpanded(false, true);
     });
 
     document.addEventListener('click', hideMenu);
@@ -226,32 +255,41 @@ export class JsonTreePanel {
 
       let children;
       let rendered = false;
-      const setExpanded = (shouldExpand) => {
+      const childNodes = [];
+      const setExpanded = (shouldExpand, recursive = false) => {
         if (!expandable) return;
-        if (!rendered) {
+        if (!rendered && shouldExpand) {
           children = document.createElement('div');
           children.className = 'children';
           children.setAttribute('role', 'group');
           const entries = Array.isArray(value) ? value.map((item, index) => [index, item]) : Object.entries(value);
           for (const [childKey, childValue] of entries) {
             const label = typeof childKey === 'number' ? '[' + childKey + ']' : childKey;
-            children.appendChild(createNode(
+            const childNode = createNode(
               label,
               childValue,
               path.concat(childKey),
-              expandDescendants,
-              expandDescendants
-            ));
+              false,
+              false
+            );
+            childNodes.push(childNode);
+            children.appendChild(childNode);
           }
           node.appendChild(children);
           rendered = true;
         }
-        children.classList.toggle('hidden', !shouldExpand);
+        if (recursive && rendered) {
+          for (const childNode of childNodes) {
+            if (childNode.setExpanded) childNode.setExpanded(shouldExpand, true);
+          }
+        }
+        if (rendered) children.classList.toggle('hidden', !shouldExpand);
         toggle.textContent = shouldExpand ? '▾' : '▸';
         node.setAttribute('aria-expanded', String(shouldExpand));
       };
+      node.setExpanded = setExpanded;
       if (expandable) {
-        setExpanded(expanded);
+        setExpanded(expanded, expandDescendants);
         row.addEventListener('click', () => setExpanded(toggle.textContent !== '▾'));
       }
       row.addEventListener('contextmenu', (event) => showMenu(event, key, value, path));
