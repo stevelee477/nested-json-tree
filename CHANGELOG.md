@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.5
+
+- Replaced raw escaped-string opening with **Open parsed JSON in new editor**, which decodes, parses, and formats nested JSON.
+
 ## 0.2.4
 
 - Added **Open raw JSON string (escaped) in new editor** for string nodes.

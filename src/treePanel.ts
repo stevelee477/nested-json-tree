@@ -12,7 +12,7 @@ interface PanelMessage {
   type:
     | "ready"
     | "openNested"
-    | "openEscapedString"
+    | "openParsedJson"
     | "copy"
     | "copyEscapedString"
     | "copyJqPath";
@@ -73,24 +73,15 @@ export class JsonTreePanel {
       return;
     }
 
-    if (message.type === "openEscapedString" && typeof message.value === "string") {
-      const document = await vscode.workspace.openTextDocument({
-        content: encodeJsonStringLiteral(message.value),
-        language: "json",
-      });
-      await vscode.window.showTextDocument(document, {
-        preview: false,
-        viewColumn: vscode.ViewColumn.Beside,
-      });
-      return;
-    }
-
     if (message.type === "copyJqPath" && Array.isArray(message.path)) {
       await vscode.env.clipboard.writeText(formatJqPath(message.path));
       return;
     }
 
-    if (message.type !== "openNested" || typeof message.value !== "string") {
+    if (
+      (message.type !== "openNested" && message.type !== "openParsedJson") ||
+      typeof message.value !== "string"
+    ) {
       return;
     }
 
@@ -102,7 +93,20 @@ export class JsonTreePanel {
     }
 
     const selected = await this.pickCandidate(candidates, jsonPath);
-    if (selected !== undefined) {
+    if (selected === undefined) {
+      return;
+    }
+
+    if (message.type === "openParsedJson") {
+      const document = await vscode.workspace.openTextDocument({
+        content: JSON.stringify(selected, null, 2),
+        language: "json",
+      });
+      await vscode.window.showTextDocument(document, {
+        preview: false,
+        viewColumn: vscode.ViewColumn.Beside,
+      });
+    } else {
       JsonTreePanel.create(selected, `Nested JSON · ${jsonPath}`, this.pickCandidate, jsonPath);
     }
   }
@@ -341,7 +345,7 @@ export class JsonTreePanel {
       menu.replaceChildren();
       if (typeof value === 'string') {
         addMenuItem('Open as nested JSON tree', () => vscode.postMessage({ type: 'openNested', value, path }));
-        addMenuItem('Open raw JSON string (escaped) in new editor', () => vscode.postMessage({ type: 'openEscapedString', value }));
+        addMenuItem('Open parsed JSON in new editor', () => vscode.postMessage({ type: 'openParsedJson', value, path }));
         addSeparator();
         addMenuItem('Copy raw JSON string (escaped)', () => vscode.postMessage({ type: 'copyEscapedString', value }));
         addMenuItem('Copy decoded string value', () => vscode.postMessage({ type: 'copy', text: value }));

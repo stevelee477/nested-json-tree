@@ -2,7 +2,7 @@
   "name": "nested-json-tree",
   "displayName": "Nested JSON Tree",
   "description": "Open JSON, JSONL lines, and escaped JSON strings as recursive tree views.",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "publisher": "local-dev",
   "license": "MIT",
   "engines": {
