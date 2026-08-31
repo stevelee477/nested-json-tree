@@ -27,6 +27,22 @@ test("returns multiple top-level JSON candidates", () => {
   assert.deepEqual(candidates.map((candidate) => candidate.value), [{ a: 1 }, [2, 3]]);
 });
 
+test("filters empty object and array candidates", () => {
+  const candidates = parseJsonCandidates('before {} then [] then {"kept":true} after');
+  assert.deepEqual(candidates.map((candidate) => candidate.value), [{ kept: true }]);
+});
+
+test("does not treat falsy primitive JSON values as empty", () => {
+  assert.deepEqual(parseJsonCandidates("null")[0].value, null);
+  assert.deepEqual(parseJsonCandidates("false")[0].value, false);
+  assert.deepEqual(parseJsonCandidates("0")[0].value, 0);
+  assert.deepEqual(parseJsonCandidates('""')[0].value, "");
+});
+
+test("returns no candidates when every JSON container is empty", () => {
+  assert.deepEqual(parseJsonCandidates('prefix {} middle [] suffix'), []);
+});
+
 test("ignores invalid outer text while finding a valid nested candidate", () => {
   const candidates = parseJsonCandidates('broken { nope: [1,2] } end');
   assert.deepEqual(candidates.map((candidate) => candidate.value), [[1, 2]]);

@@ -35,7 +35,7 @@ export function parseJsonCandidates(text: string): JsonCandidate[] {
   if (bounds.start < bounds.end) {
     const raw = text.slice(bounds.start, bounds.end);
     const parsed = tryParse(raw);
-    if (parsed.ok) {
+    if (parsed.ok && !isEmptyContainer(parsed.value)) {
       return [{ value: parsed.value, raw, start: bounds.start, end: bounds.end, unwrapDepth: 0 }];
     }
   }
@@ -54,7 +54,7 @@ export function parseJsonCandidates(text: string): JsonCandidate[] {
 
     const raw = text.slice(index, end);
     const parsed = tryParse(raw);
-    if (parsed.ok) {
+    if (parsed.ok && !isEmptyContainer(parsed.value)) {
       candidates.push({ value: parsed.value, raw, start: index, end, unwrapDepth: 0 });
       index = end - 1;
     }
@@ -158,6 +158,13 @@ function tryParse(raw: string): { ok: true; value: JsonValue } | { ok: false } {
   } catch {
     return { ok: false };
   }
+}
+
+function isEmptyContainer(value: JsonValue): boolean {
+  if (Array.isArray(value)) {
+    return value.length === 0;
+  }
+  return value !== null && typeof value === "object" && Object.keys(value).length === 0;
 }
 
 function formatBytes(bytes: number): string {

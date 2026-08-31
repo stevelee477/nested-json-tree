@@ -9,6 +9,7 @@ A VS Code viewer for JSON that is buried in logs, stored in JSONL, or encoded as
 - Provides **Expand all** and **Collapse all** buttons in every tree view.
 - Ignores unrelated text before and after a valid JSON object or array.
 - Detects multiple JSON candidates and asks which one to open.
+- Filters empty object (`{}`) and array (`[]`) candidates from extraction results.
 - Opens the current JSONL/NDJSON line without parsing the rest as JSON.
 - Right-clicks any string node and chooses **Open as nested JSON tree**.
 - Copies either the decoded string value or its raw JSON literal form, preserving escapes such as `\\n`, `\\"`, and `\\\\`.

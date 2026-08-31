@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2
+
+- Empty object and array values are no longer shown as extracted JSON candidates.
+
 ## 0.2.1
 
 - Added one-click **Expand all** and **Collapse all** controls to every tree view.
