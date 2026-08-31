@@ -1,0 +1,6 @@
+node_modules/
+out/
+work/
+outputs/
+*.vsix
+.DS_Store

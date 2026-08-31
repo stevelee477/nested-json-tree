@@ -1,0 +1,99 @@
+{
+  "name": "nested-json-tree",
+  "displayName": "Nested JSON Tree",
+  "description": "Open JSON, JSONL lines, and escaped JSON strings as recursive tree views.",
+  "version": "0.2.0",
+  "publisher": "local-dev",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Data Science",
+    "Other"
+  ],
+  "keywords": [
+    "json",
+    "jsonl",
+    "tree",
+    "escaped json",
+    "nested json"
+  ],
+  "activationEvents": [
+    "onCommand:nestedJsonTree.openDocument",
+    "onCommand:nestedJsonTree.openCurrentLine"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Nested JSON Tree",
+      "properties": {
+        "nestedJsonTree.autoExpandMaxNodes": {
+          "type": "integer",
+          "default": 200,
+          "minimum": 0,
+          "maximum": 10000,
+          "markdownDescription": "Automatically expand every object and array when the JSON contains at most this many value nodes. Set to `0` to expand only the root node."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "nestedJsonTree.openDocument",
+        "title": "Nested JSON Tree: Open Document as Tree",
+        "icon": "$(json)"
+      },
+      {
+        "command": "nestedJsonTree.openCurrentLine",
+        "title": "Nested JSON Tree: Open Current Line as Tree",
+        "icon": "$(list-tree)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "nestedJsonTree.openDocument",
+          "when": "(editorLangId == json || editorLangId == jsonc) && resourceExtname != .jsonl && resourceExtname != .ndjson",
+          "group": "navigation@20"
+        },
+        {
+          "command": "nestedJsonTree.openCurrentLine",
+          "when": "resourceExtname == .jsonl || resourceExtname == .ndjson",
+          "group": "navigation@20"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "nestedJsonTree.openDocument",
+          "when": "editorTextFocus",
+          "group": "navigation@90"
+        },
+        {
+          "command": "nestedJsonTree.openCurrentLine",
+          "when": "editorTextFocus",
+          "group": "navigation@91"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "nestedJsonTree.openDocument"
+        },
+        {
+          "command": "nestedJsonTree.openCurrentLine"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node --test out/test/*.test.js",
+    "package": "vsce package --no-dependencies --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.6.0",
+    "typescript": "^5.9.0"
+  }
+}
