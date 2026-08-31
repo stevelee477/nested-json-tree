@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.6
+
+- Added the current-line tree command to JSONL/NDJSON editor context menus.
+- Limited editor context-menu commands to JSON/JSONC and JSONL/NDJSON files while keeping them available in the Command Palette.
+
 ## 0.2.5
 
 - Replaced raw escaped-string opening with **Open parsed JSON in new editor**, which decodes, parses, and formats nested JSON.

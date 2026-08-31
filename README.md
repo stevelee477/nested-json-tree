@@ -33,6 +33,8 @@ Set `nestedJsonTree.autoExpandMaxNodes` in VS Code Settings to change the automa
 5. Choose **Copy raw JSON string (escaped)** when you need the quoted JSON literal rather than decoded newlines or tabs.
 6. Choose **Open parsed JSON in new editor** to decode, parse, and format the nested JSON as a separate file.
 
+The editor context-menu entries appear only for JSON/JSONC and JSONL/NDJSON files. Both commands remain available from the Command Palette for other text and log files.
+
 ## Development
 
 ```sh
