@@ -110,12 +110,12 @@
     "package": "vsce package --no-dependencies --allow-missing-repository"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^26.4.0",
     "@types/vscode": "^1.90.0",
     "@vscode/test-electron": "3.1.0",
     "@vscode/vsce": "^3.6.0",
     "esbuild": "^0.28.2",
-    "typescript": "^5.9.0"
+    "typescript": "^7.0.2"
   },
   "dependencies": {
     "jsonc-parser": "^3.3.1"
