@@ -1,0 +1,25 @@
+name: Feature request
+description: Suggest a focused improvement
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What JSON inspection workflow is difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the command, interaction, or result you expect.
+    validations:
+      required: true
+  - type: textarea
+    id: sample
+    attributes:
+      label: Optional sanitized sample
+      description: Do not include credentials, internal URLs, or personal information.
+      render: json

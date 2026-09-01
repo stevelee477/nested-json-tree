@@ -1,0 +1,20 @@
+{
+  "requestId": "req_demo_2026_0901",
+  "service": "checkout",
+  "status": "success",
+  "durationMs": 128,
+  "user": {
+    "id": 2048,
+    "displayName": "Ada Chen",
+    "roles": [
+      "buyer",
+      "beta-tester"
+    ]
+  },
+  "payload": "{\"order\":{\"id\":\"ORD-2048\",\"items\":[{\"sku\":\"KEYBOARD-75\",\"quantity\":1},{\"sku\":\"CABLE-USB-C\",\"quantity\":2}],\"shipping\":{\"city\":\"Shanghai\",\"express\":true}},\"trace\":{\"sampled\":true,\"tags\":[\"demo\",\"nested-json\"]}}",
+  "metadata": {
+    "environment": "demo",
+    "retry": false,
+    "region": "ap-east"
+  }
+}

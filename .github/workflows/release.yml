@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Verify tag matches package version
+        run: node -e "const version=require('./package.json').version; if (process.env.GITHUB_REF_NAME !== 'v'+version) throw new Error('Tag must be v'+version)"
+      - name: Package VSIX
+        run: |
+          mkdir -p dist
+          npm run package -- --out "dist/nested-json-tree-${GITHUB_REF_NAME#v}.vsix"
+          cd dist
+          sha256sum *.vsix > SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.vsix
+            dist/SHA256SUMS.txt

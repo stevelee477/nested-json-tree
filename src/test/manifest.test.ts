@@ -10,6 +10,10 @@ interface MenuItem {
 
 interface ExtensionManifest {
   icon: string;
+  author: { name: string; email: string };
+  repository: { type: string; url: string };
+  homepage: string;
+  bugs: { url: string };
   contributes: {
     menus: Record<string, MenuItem[]>;
   };
@@ -26,6 +30,17 @@ test("manifest icon is a square 256 px PNG", () => {
   assert.deepEqual([...png.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
   assert.equal(png.readUInt32BE(16), 256);
   assert.equal(png.readUInt32BE(20), 256);
+});
+
+test("GitHub publication metadata is complete and uses the public author identity", () => {
+  assert.deepEqual(manifest.author, {
+    name: "stevelee477",
+    email: "hi.whoareyou12@gmail.com",
+  });
+  assert.equal(manifest.repository.type, "git");
+  assert.equal(manifest.repository.url, "https://github.com/stevelee477/nested-json-tree.git");
+  assert.equal(manifest.homepage, "https://github.com/stevelee477/nested-json-tree#readme");
+  assert.equal(manifest.bugs.url, "https://github.com/stevelee477/nested-json-tree/issues");
 });
 
 test("editor context commands are limited to JSON and JSONL family files", () => {

@@ -5,6 +5,22 @@
   "version": "0.3.1",
   "publisher": "local-dev",
   "icon": "assets/icon.png",
+  "author": {
+    "name": "stevelee477",
+    "email": "hi.whoareyou12@gmail.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/stevelee477/nested-json-tree.git"
+  },
+  "homepage": "https://github.com/stevelee477/nested-json-tree#readme",
+  "bugs": {
+    "url": "https://github.com/stevelee477/nested-json-tree/issues"
+  },
+  "galleryBanner": {
+    "color": "#15192D",
+    "theme": "dark"
+  },
   "license": "MIT",
   "engines": {
     "vscode": "^1.90.0"
