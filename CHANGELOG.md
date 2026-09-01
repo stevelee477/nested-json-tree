@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0
+
+- Added case-insensitive Tree View search across keys and primitive values.
+- Search expands matching paths, filters unrelated branches, reports match counts, and supports next/previous navigation.
+
 ## 0.2.6
 
 - Added the current-line tree command to JSONL/NDJSON editor context menus.

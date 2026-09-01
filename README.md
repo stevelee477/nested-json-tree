@@ -7,6 +7,7 @@ A VS Code viewer for JSON that is buried in logs, stored in JSONL, or encoded as
 - Opens the current document as an interactive JSON tree.
 - Automatically expands JSON trees with at most 200 value nodes; larger trees open with only the root expanded.
 - Provides **Expand all** and **Collapse all** buttons in every tree view.
+- Searches keys and primitive values, filters unrelated branches, and navigates matches with `Enter` / `Shift+Enter`.
 - Ignores unrelated text before and after a valid JSON object or array.
 - Detects multiple JSON candidates and asks which one to open.
 - Filters empty object (`{}`) and array (`[]`) candidates from extraction results.
