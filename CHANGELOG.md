@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Opened nested JSON Tree Views as new tabs in the current editor group instead of splitting them to the side.
+
 ## 0.4.0
 
 - Added JSONC parsing with line/block comments and trailing commas.

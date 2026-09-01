@@ -70,6 +70,18 @@ test("Webview actions send only host-resolved node IDs", () => {
   assert.match(source, /hasDuplicateKeyInPath/);
 });
 
+test("nested Tree Views open as new tabs in the source editor group", () => {
+  assert.match(
+    source,
+    /viewColumn: vscode\.ViewColumn = vscode\.ViewColumn\.Beside/,
+  );
+  assert.match(
+    source,
+    /displayPath,\s*this\.panel\.viewColumn \?\? vscode\.ViewColumn\.Active,/,
+  );
+  assert.match(source, /viewColumn: vscode\.ViewColumn\.Beside,/);
+});
+
 test("Webview model truncation is explicit and limits search scope", () => {
   assert.match(source, /createJsonTreeWebviewModel\(candidate\.tree\)/);
   assert.match(source, /const displayPath = formatJsonPathForDisplay\(materializeJsonTreePath\(context\)\)/);

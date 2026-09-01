@@ -67,11 +67,12 @@ export class JsonTreePanel {
     title: string,
     pickCandidate: CandidatePicker,
     pathLabel = "$",
+    viewColumn: vscode.ViewColumn = vscode.ViewColumn.Beside,
   ): JsonTreePanel {
     const panel = vscode.window.createWebviewPanel(
       "nestedJsonTree.viewer",
       title,
-      vscode.ViewColumn.Beside,
+      viewColumn,
       { enableScripts: true, retainContextWhenHidden: true },
     );
     return new JsonTreePanel(panel, candidate, title, pathLabel, pickCandidate);
@@ -266,6 +267,7 @@ export class JsonTreePanel {
         `Nested JSON · ${displayPath}`,
         this.pickCandidate,
         displayPath,
+        this.panel.viewColumn ?? vscode.ViewColumn.Active,
       );
     }
   }
