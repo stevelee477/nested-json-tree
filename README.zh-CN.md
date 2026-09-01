@@ -16,16 +16,17 @@
 
 Nested JSON Tree 专门处理普通格式化工具不擅长的 JSON：日志行中夹杂的 JSON、JSONL 文件里的单条记录，以及嵌套多层的转义 JSON 字符串。
 
-![在 JSON Tree 中搜索](assets/screenshots/tree-search.png)
+<a href="assets/screenshots/tree-search.png"><img src="assets/screenshots/tree-search.png" width="1000" alt="在 JSON Tree 中搜索"></a>
 
 ## 主要功能
 
 - 将 JSON/JSONC 文档打开为可折叠的树。
 - 支持 JSONC 的行注释、块注释和尾逗号。
 - JSON 前后有日志或其他无关文字时，仍可提取完整 JSON。
-- 只读取并解析 JSONL/NDJSON 光标所在行，不把整个文档送入解析器。
+- 在同一个 Tree View 中浏览 JSONL/NDJSON 的有效记录，不把整个文档送入解析器。
 - 右键字符串，递归打开转义或重复编码的嵌套 JSON。
 - 将嵌套 JSON 反转义、解析并格式化到普通编辑器。
+- 将任意字符串反转义后原样打开为纯文本，真实保留换行等解码字符，不要求内容是 JSON。
 - 大整数以及 `"\u0061"`、`"\/"` 这样的原始 token 在显示、搜索、复制和格式化时都不会失真。
 - 分片搜索解码值与原始字段/值，过滤无关分支并逐个跳转结果。
 - 复制无损值、解码字符串、完全原样的转义字符串、JSONPath 和 jq 路径。
@@ -36,15 +37,17 @@ Nested JSON Tree 专门处理普通格式化工具不擅长的 JSON：日志行�
 
 右键任意字符串节点，即可打开其中编码的 JSON。新打开的 Tree View 仍支持相同操作，因此可以继续逐层深入。
 
-![打开转义的嵌套 JSON](assets/screenshots/nested-json-menu.png)
+<a href="assets/screenshots/nested-json-menu.png"><img src="assets/screenshots/nested-json-menu.png" width="1000" alt="打开转义的嵌套 JSON"></a>
 
-也可以选择 **Open parsed JSON in new editor**，把字符串反转义并格式化为普通 JSON 文档。
+选择 **Open parsed JSON in new editor** 可以把字符串反转义并格式化为普通 JSON 文档；选择 **Open decoded string value in new editor** 则会把解码后的文本不经解析、格式化，直接打开为纯文本。
 
 ## JSONL / NDJSON
 
 把光标放到目标记录上，通过编辑器右键菜单或命令面板执行 **Nested JSON Tree: Open Current Line as Tree**。
 
-![打开当前 JSONL 行](assets/screenshots/jsonl-current-line.png)
+<a href="assets/screenshots/jsonl-current-line.png"><img src="assets/screenshots/jsonl-current-line.png" width="1000" alt="浏览 JSONL 文件"></a>
+
+Tree View 会保留源文件地址和当前行号。可以用 **Prev**、**Next** 或输入行号，在当前 Tab 中跳转到有效记录；空行、非法行和触发资源上限的行会被跳过。**Source** 用于定位源文件中的当前记录。**Follow cursor** 默认关闭，需要时可手动开启。
 
 编辑器右键入口只在 JSON/JSONC 和 JSONL/NDJSON 文件中显示。对于文本和日志文件，仍可通过 `Cmd+Shift+P` / `Ctrl+Shift+P` 调用两个命令。
 
@@ -59,7 +62,7 @@ Nested JSON Tree 专门处理普通格式化工具不擅长的 JSON：日志行�
 也可以使用命令行：
 
 ```sh
-code --install-extension nested-json-tree-0.4.0.vsix
+code --install-extension nested-json-tree-0.5.0.vsix
 ```
 
 ## 命令
@@ -76,6 +79,7 @@ code --install-extension nested-json-tree-0.4.0.vsix
 - `Enter` / `Shift+Enter`：跳转下一个或上一个结果。
 - `Esc`：清空搜索并恢复搜索前的展开状态。
 - 右键节点：复制值、字段名、JSONPath 或 jq 路径。
+- 字符串节点可以打开已解析 JSON，也可以将反转义后的内容原样打开为纯文本。
 
 jq 路径示例：
 

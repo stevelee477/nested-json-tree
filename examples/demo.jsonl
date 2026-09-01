@@ -1,3 +1,5 @@
 {"time":"2026-09-01T10:00:00Z","level":"info","event":"session.started","sessionId":"demo-001","context":"{\"client\":{\"name\":\"VS Code\",\"version\":\"1.95\"},\"features\":[\"json-tree\",\"search\"]}"}
+
+not a JSON record
 {"time":"2026-09-01T10:00:01Z","level":"info","event":"order.created","orderId":"ORD-2048","payload":"{\"items\":[{\"sku\":\"KEYBOARD-75\",\"quantity\":1}],\"total\":129.5,\"currency\":\"USD\"}"}
 {"time":"2026-09-01T10:00:02Z","level":"warn","event":"delivery.delayed","orderId":"ORD-2048","details":"{\"estimatedMinutes\":18,\"reason\":\"demo traffic\"}"}

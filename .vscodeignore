@@ -11,6 +11,7 @@ out/test/**
 out/integration/**
 out/**/*.map
 out/jsonTree.js
+out/jsonlNavigator.js
 out/parser.js
 out/paths.js
 out/search.js

@@ -3,6 +3,10 @@
 ## Unreleased
 
 - Opened nested JSON Tree Views as new tabs in the current editor group instead of splitting them to the side.
+- Added previous/next valid-record navigation, line-number jumps, source reveal, and optional cursor following to JSONL/NDJSON Tree Views without parsing the whole file.
+- Simplified Tree View rows to compact `{count}` and `[count]` summaries and removed redundant visual type badges.
+- Added **Open decoded string value in new editor** for viewing decoded text without parsing or formatting it.
+- Replaced README screenshots with cropped Retina captures and displayed them at a readable size.
 
 ## 0.4.0
 

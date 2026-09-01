@@ -2,6 +2,8 @@ import * as vscode from "vscode";
 import {
   JsonCandidate,
   JsonProcessingLimitError,
+  assertInputSize,
+  parseJsonCandidates,
   parseNestedJsonCandidates,
 } from "./parser";
 import {
@@ -29,6 +31,15 @@ import {
   isTreeNodeCountWithinLimit,
   shouldAutoExpandTree,
 } from "./treeOptions";
+import { findJsonlRecord } from "./jsonlNavigator";
+
+export interface JsonlSourceContext {
+  uri: vscode.Uri;
+  sourceName: string;
+  lineNumber: number;
+  lineCount: number;
+  followCursor?: boolean;
+}
 
 export type CandidatePicker = (
   candidates: ReturnType<typeof parseNestedJsonCandidates>,
@@ -38,6 +49,7 @@ export type CandidatePicker = (
 type NodeAction =
   | "openNested"
   | "openParsedJson"
+  | "openDecodedValue"
   | "copyValue"
   | "copyRawString"
   | "copyDecodedString"
@@ -49,6 +61,7 @@ type NodeAction =
 const NODE_ACTIONS = new Set<NodeAction>([
   "openNested",
   "openParsedJson",
+  "openDecodedValue",
   "copyValue",
   "copyRawString",
   "copyDecodedString",
@@ -59,8 +72,11 @@ const NODE_ACTIONS = new Set<NodeAction>([
 ]);
 
 export class JsonTreePanel {
-  private readonly nodeContexts: Map<number, JsonTreeNodeContext>;
-  private readonly webviewModel: ReturnType<typeof createJsonTreeWebviewModel>;
+  private nodeContexts: Map<number, JsonTreeNodeContext>;
+  private webviewModel: ReturnType<typeof createJsonTreeWebviewModel>;
+  private navigationGeneration = 0;
+  private followCursorTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly disposables: vscode.Disposable[] = [];
 
   static create(
     candidate: JsonCandidate,
@@ -68,6 +84,7 @@ export class JsonTreePanel {
     pickCandidate: CandidatePicker,
     pathLabel = "$",
     viewColumn: vscode.ViewColumn = vscode.ViewColumn.Beside,
+    jsonlSource?: JsonlSourceContext,
   ): JsonTreePanel {
     const panel = vscode.window.createWebviewPanel(
       "nestedJsonTree.viewer",
@@ -75,44 +92,71 @@ export class JsonTreePanel {
       viewColumn,
       { enableScripts: true, retainContextWhenHidden: true },
     );
-    return new JsonTreePanel(panel, candidate, title, pathLabel, pickCandidate);
+    return new JsonTreePanel(panel, candidate, title, pathLabel, pickCandidate, jsonlSource);
   }
 
   private constructor(
     private readonly panel: vscode.WebviewPanel,
-    private readonly candidate: JsonCandidate,
-    private readonly title: string,
-    private readonly pathLabel: string,
+    private candidate: JsonCandidate,
+    private title: string,
+    private pathLabel: string,
     private readonly pickCandidate: CandidatePicker,
+    private readonly jsonlSource?: JsonlSourceContext,
   ) {
     this.nodeContexts = buildJsonTreeContextIndex(candidate.tree);
     this.webviewModel = createJsonTreeWebviewModel(candidate.tree);
-    panel.webview.onDidReceiveMessage((message: unknown) => void this.handleMessage(message));
+    this.disposables.push(
+      panel.webview.onDidReceiveMessage((message: unknown) => void this.handleMessage(message)),
+      panel.onDidDispose(() => this.dispose()),
+    );
+    if (jsonlSource !== undefined) {
+      jsonlSource.followCursor ??= false;
+      this.disposables.push(
+        vscode.window.onDidChangeTextEditorSelection((event) => this.handleSourceSelection(event)),
+      );
+    }
     panel.webview.html = this.getHtml(panel.webview);
+  }
+
+  private dispose(): void {
+    this.navigationGeneration += 1;
+    if (this.followCursorTimer !== undefined) clearTimeout(this.followCursorTimer);
+    for (const disposable of this.disposables.splice(0)) disposable.dispose();
+  }
+
+  private async postRender(status = ""): Promise<void> {
+    const maxNodes = vscode.workspace
+      .getConfiguration("nestedJsonTree")
+      .get<number>("autoExpandMaxNodes", 200);
+    await this.panel.webview.postMessage({
+      type: "render",
+      root: this.webviewModel.root,
+      title: this.title,
+      pathLabel: this.pathLabel,
+      truncatedFieldCount: this.webviewModel.truncatedFieldCount,
+      autoExpand: shouldAutoExpandTree(this.candidate.tree, maxNodes),
+      canExpandAll: isTreeNodeCountWithinLimit(this.candidate.tree, MAX_EXPAND_ALL_NODES),
+      expandAllLimit: MAX_EXPAND_ALL_NODES,
+      jsonl: this.jsonlSource === undefined
+        ? undefined
+        : {
+            lineNumber: this.jsonlSource.lineNumber + 1,
+            lineCount: this.jsonlSource.lineCount,
+            followCursor: this.jsonlSource.followCursor,
+            status,
+          },
+    });
   }
 
   private async handleMessage(message: unknown): Promise<void> {
     if (!isPanelMessage(message)) return;
 
     if (message.type === "ready") {
-      const maxNodes = vscode.workspace
-        .getConfiguration("nestedJsonTree")
-        .get<number>("autoExpandMaxNodes", 200);
-      await this.panel.webview.postMessage({
-        type: "render",
-        root: this.webviewModel.root,
-        title: this.title,
-        pathLabel: this.pathLabel,
-        truncatedFieldCount: this.webviewModel.truncatedFieldCount,
-        autoExpand: shouldAutoExpandTree(this.candidate.tree, maxNodes),
-        canExpandAll: isTreeNodeCountWithinLimit(
-          this.candidate.tree,
-          MAX_EXPAND_ALL_NODES,
-        ),
-        expandAllLimit: MAX_EXPAND_ALL_NODES,
-      });
+      await this.postRender();
       return;
     }
+
+    if (await this.handleJsonlMessage(message)) return;
 
     if (!isNodeAction(message.type) || !isValidJsonTreeNodeId(message.nodeId)) return;
     const context = this.nodeContexts.get(message.nodeId);
@@ -214,6 +258,29 @@ export class JsonTreePanel {
       return;
     }
 
+    if (message.type === "openDecodedValue") {
+      if (node.type !== "string") return;
+      try {
+        const text = node.value as string;
+        assertTransferTextSize(text);
+        const document = await vscode.workspace.openTextDocument({
+          content: text,
+          language: "plaintext",
+        });
+        await vscode.window.showTextDocument(document, {
+          preview: false,
+          viewColumn: vscode.ViewColumn.Beside,
+        });
+      } catch (error) {
+        if (error instanceof JsonTreeOutputTooLargeError) {
+          void vscode.window.showErrorMessage(`Cannot open decoded string: ${error.message}`);
+          return;
+        }
+        throw error;
+      }
+      return;
+    }
+
     if (message.type !== "openNested" && message.type !== "openParsedJson") return;
     if (node.type !== "string") return;
     const displayPath = formatJsonPathForDisplay(materializeJsonTreePath(context));
@@ -272,6 +339,158 @@ export class JsonTreePanel {
     }
   }
 
+  private async handleJsonlMessage(message: PanelMessage): Promise<boolean> {
+    const source = this.jsonlSource;
+    if (source === undefined) return false;
+    if (message.type === "setFollowCursor") {
+      source.followCursor = message.enabled === true;
+      await this.postJsonlState(
+        source.followCursor ? "Following source cursor" : "Follow cursor off",
+      );
+      return true;
+    }
+    if (message.type === "revealSource") {
+      await this.revealSourceLine();
+      return true;
+    }
+    if (message.type === "previousJsonl") {
+      await this.navigateJsonl(source.lineNumber - 1, -1);
+      return true;
+    }
+    if (message.type === "nextJsonl") {
+      await this.navigateJsonl(source.lineNumber + 1, 1);
+      return true;
+    }
+    if (message.type === "goToJsonlLine") {
+      if (typeof message.lineNumber !== "number" || !Number.isInteger(message.lineNumber)) return true;
+      await this.navigateJsonl(Math.max(0, message.lineNumber - 1), 1);
+      return true;
+    }
+    return false;
+  }
+
+  private async navigateJsonl(startLine: number, direction: -1 | 1): Promise<void> {
+    const source = this.jsonlSource;
+    if (source === undefined) return;
+    const generation = ++this.navigationGeneration;
+    await this.postJsonlState("Scanning…", true);
+    const document = await vscode.workspace.openTextDocument(source.uri);
+    source.lineCount = document.lineCount;
+    const result = await findJsonlRecord(
+      {
+        lineCount: document.lineCount,
+        lineAt: (lineNumber) => document.lineAt(lineNumber).text,
+      },
+      startLine,
+      direction,
+      { isCancelled: () => generation !== this.navigationGeneration },
+    );
+    if (generation !== this.navigationGeneration || result.status === "cancelled") return;
+    if (result.status === "not-found") {
+      await this.postJsonlState(
+        direction > 0 ? "No later valid JSON line" : "No earlier valid JSON line",
+      );
+      return;
+    }
+    const place = `line ${result.record.lineNumber + 1}`;
+    const selected = await this.pickCandidate(result.record.candidates, place);
+    if (generation !== this.navigationGeneration) return;
+    if (selected === undefined) {
+      await this.postJsonlState("");
+      return;
+    }
+    const skipped = result.record.skippedLines;
+    this.updateJsonlCandidate(selected, result.record.lineNumber);
+    await this.postRender(
+      skipped === 0
+        ? ""
+        : `Skipped ${skipped.toLocaleString()} invalid or empty line${skipped === 1 ? "" : "s"}`,
+    );
+  }
+
+  private updateJsonlCandidate(candidate: JsonCandidate, lineNumber: number): void {
+    const source = this.jsonlSource;
+    if (source === undefined) return;
+    source.lineNumber = lineNumber;
+    this.candidate = candidate;
+    this.nodeContexts = buildJsonTreeContextIndex(candidate.tree);
+    this.webviewModel = createJsonTreeWebviewModel(candidate.tree);
+    this.title = `JSON Tree · ${source.sourceName}:${lineNumber + 1}`;
+    this.pathLabel = `$ · line ${lineNumber + 1}`;
+    this.panel.title = this.title;
+  }
+
+  private async postJsonlState(status: string, busy = false): Promise<void> {
+    const source = this.jsonlSource;
+    if (source === undefined) return;
+    await this.panel.webview.postMessage({
+      type: "jsonlState",
+      lineNumber: source.lineNumber + 1,
+      lineCount: source.lineCount,
+      followCursor: source.followCursor,
+      status,
+      busy,
+    });
+  }
+
+  private handleSourceSelection(event: vscode.TextEditorSelectionChangeEvent): void {
+    const source = this.jsonlSource;
+    if (
+      source === undefined ||
+      !source.followCursor ||
+      event.textEditor.document.uri.toString() !== source.uri.toString()
+    ) return;
+    if (this.followCursorTimer !== undefined) clearTimeout(this.followCursorTimer);
+    const lineNumber = event.selections[0]?.active.line;
+    if (lineNumber === undefined || lineNumber === source.lineNumber) return;
+    this.followCursorTimer = setTimeout(() => void this.followSourceLine(lineNumber), 150);
+  }
+
+  private async followSourceLine(lineNumber: number): Promise<void> {
+    const source = this.jsonlSource;
+    if (source === undefined || !source.followCursor) return;
+    const generation = ++this.navigationGeneration;
+    const document = await vscode.workspace.openTextDocument(source.uri);
+    source.lineCount = document.lineCount;
+    let candidates: JsonCandidate[];
+    try {
+      const text = document.lineAt(lineNumber).text;
+      assertInputSize(text);
+      candidates = parseJsonCandidates(text);
+    } catch (error) {
+      if (error instanceof JsonProcessingLimitError) candidates = [];
+      else throw error;
+    }
+    if (generation !== this.navigationGeneration) return;
+    if (candidates.length === 0) {
+      await this.postJsonlState(`Line ${lineNumber + 1} has no valid JSON`);
+      return;
+    }
+    const selected = await this.pickCandidate(candidates, `line ${lineNumber + 1}`);
+    if (generation !== this.navigationGeneration || selected === undefined) return;
+    this.updateJsonlCandidate(selected, lineNumber);
+    await this.postRender();
+  }
+
+  private async revealSourceLine(): Promise<void> {
+    const source = this.jsonlSource;
+    if (source === undefined) return;
+    const document = await vscode.workspace.openTextDocument(source.uri);
+    source.lineCount = document.lineCount;
+    const visible = vscode.window.visibleTextEditors.find(
+      (editor) => editor.document.uri.toString() === source.uri.toString(),
+    );
+    const editor = await vscode.window.showTextDocument(document, {
+      preview: false,
+      viewColumn: visible?.viewColumn ?? vscode.ViewColumn.Beside,
+      preserveFocus: false,
+    });
+    const line = Math.min(source.lineNumber, Math.max(0, document.lineCount - 1));
+    const range = document.lineAt(line).range;
+    editor.selection = new vscode.Selection(range.start, range.end);
+    editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+  }
+
   private getHtml(webview: vscode.Webview): string {
     const nonce = createNonce();
     const searchRuntime = [
@@ -296,6 +515,9 @@ export class JsonTreePanel {
     * { box-sizing: border-box; }
     body {
       margin: 0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
       color: var(--vscode-foreground);
       background: var(--vscode-editor-background);
       font-family: var(--vscode-font-family);
@@ -303,35 +525,52 @@ export class JsonTreePanel {
       overflow: hidden;
     }
     header {
-      height: 78px;
+      flex: 0 0 auto;
       display: flex;
       flex-direction: column;
-      gap: 5px;
-      padding: 6px 14px;
+      gap: 4px;
+      padding: 5px 10px;
       border-bottom: 1px solid var(--vscode-panel-border);
       background: var(--vscode-editor-background);
     }
-    .header-main { width: 100%; display: flex; align-items: center; gap: 10px; min-height: 27px; }
+    .header-main { width: 100%; display: flex; align-items: center; gap: 8px; min-height: 24px; }
     .header-title { min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .header-path { color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family); }
     .header-actions { display: flex; gap: 4px; margin-left: auto; }
     .header-button {
-      height: 26px;
-      padding: 0 9px;
+      flex: 0 0 auto;
+      height: 24px;
+      padding: 0 7px;
       border: 1px solid transparent;
       border-radius: 3px;
       color: var(--vscode-button-secondaryForeground);
       background: var(--vscode-button-secondaryBackground);
       font: inherit;
+      white-space: nowrap;
       cursor: pointer;
     }
     .header-button:hover { background: var(--vscode-button-secondaryHoverBackground); }
     .header-button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
     .header-button:disabled { opacity: 0.5; cursor: default; }
-    .search-bar { width: 100%; display: flex; align-items: center; gap: 4px; }
+    .search-bar, .jsonl-bar { width: 100%; display: flex; align-items: center; gap: 4px; }
+    .jsonl-bar { color: var(--vscode-descriptionForeground); white-space: nowrap; }
+    .jsonl-line-label { white-space: nowrap; }
+    #jsonl-line {
+      width: 76px;
+      height: 24px;
+      padding: 1px 6px;
+      border: 1px solid var(--vscode-input-border, transparent);
+      outline: none;
+      color: var(--vscode-input-foreground);
+      background: var(--vscode-input-background);
+      font: inherit;
+    }
+    #jsonl-line:focus { border-color: var(--vscode-focusBorder); }
+    .follow-label { display: inline-flex; align-items: center; gap: 4px; margin-left: 4px; white-space: nowrap; }
+    #jsonl-status { min-width: 0; margin-left: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #search-input {
       min-width: 100px;
-      height: 27px;
+      height: 24px;
       flex: 1;
       padding: 2px 8px;
       border: 1px solid var(--vscode-input-border, transparent);
@@ -351,10 +590,10 @@ export class JsonTreePanel {
       white-space: nowrap;
     }
     .search-button { width: 28px; padding: 0; font-family: var(--vscode-editor-font-family); }
-    #tree { height: calc(100vh - 78px); padding: 8px 4px 24px 8px; overflow: auto; }
+    #tree { min-height: 0; flex: 1 1 auto; padding: 6px 4px 24px 6px; overflow: auto; }
     .node { font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
     .row {
-      min-height: 23px;
+      min-height: 21px;
       display: flex;
       align-items: center;
       padding-right: 8px;
@@ -384,17 +623,7 @@ export class JsonTreePanel {
     .value.boolean { color: var(--vscode-debugTokenExpression-boolean, #569cd6); }
     .value.null { color: var(--vscode-descriptionForeground); font-style: italic; }
     .summary { color: var(--vscode-descriptionForeground); }
-    .badge {
-      margin-left: 8px;
-      padding: 0 5px;
-      border: 1px solid var(--vscode-panel-border);
-      border-radius: 8px;
-      color: var(--vscode-descriptionForeground);
-      font-family: var(--vscode-font-family);
-      font-size: 10px;
-      text-transform: uppercase;
-    }
-    .truncated-badge { text-transform: none; }
+    .truncated-note { margin-left: 6px; color: var(--vscode-descriptionForeground); font-size: 11px; }
     .children { margin-left: 18px; border-left: 1px solid var(--vscode-tree-indentGuidesStroke); padding-left: 1px; }
     .hidden { display: none !important; }
     #menu {
@@ -432,6 +661,17 @@ export class JsonTreePanel {
         <button class="header-button" id="collapse-all" type="button" title="Collapse the entire tree">Collapse all</button>
       </span>
     </div>
+    <div class="jsonl-bar hidden" id="jsonl-bar" aria-label="JSONL navigation">
+      <button class="header-button" id="previous-jsonl" type="button" title="Previous valid JSON line">← Prev</button>
+      <button class="header-button" id="next-jsonl" type="button" title="Next valid JSON line">Next →</button>
+      <label class="jsonl-line-label" for="jsonl-line">Line</label>
+      <input id="jsonl-line" type="number" min="1" step="1" inputmode="numeric" aria-label="JSONL line number">
+      <span id="jsonl-total"></span>
+      <button class="header-button" id="go-jsonl" type="button">Go</button>
+      <button class="header-button" id="reveal-source" type="button" title="Reveal this record in the source file">Source</button>
+      <label class="follow-label"><input id="follow-cursor" type="checkbox"> Follow cursor</label>
+      <span id="jsonl-status" aria-live="polite"></span>
+    </div>
     <div class="search-bar" role="search">
       <input id="search-input" type="search" placeholder="Search keys and values…" aria-label="Search JSON keys and values" spellcheck="false" disabled>
       <span id="search-scope-warning" class="hidden" title="Long keys and values are shortened in this view. Search covers the displayed prefix and suffix only; copy and open actions still use the complete host value.">Long values shortened · search is display-only</span>
@@ -458,6 +698,15 @@ export class JsonTreePanel {
     const expandAllButton = document.getElementById('expand-all');
     const collapseAllButton = document.getElementById('collapse-all');
     const emptySearch = document.getElementById('empty-search');
+    const jsonlBar = document.getElementById('jsonl-bar');
+    const previousJsonlButton = document.getElementById('previous-jsonl');
+    const nextJsonlButton = document.getElementById('next-jsonl');
+    const jsonlLineInput = document.getElementById('jsonl-line');
+    const jsonlTotal = document.getElementById('jsonl-total');
+    const goJsonlButton = document.getElementById('go-jsonl');
+    const revealSourceButton = document.getElementById('reveal-source');
+    const followCursorInput = document.getElementById('follow-cursor');
+    const jsonlStatus = document.getElementById('jsonl-status');
     let rootNode;
     let currentRoot;
     let searchTimer;
@@ -472,6 +721,10 @@ export class JsonTreePanel {
 
     window.addEventListener('message', (event) => {
       const message = event.data;
+      if (message.type === 'jsonlState') {
+        applyJsonlState(message);
+        return;
+      }
       if (message.type !== 'render') return;
       activeTreeOperation += 1;
       latestSearchRequest += 1;
@@ -480,6 +733,8 @@ export class JsonTreePanel {
       expandAllAllowed = message.canExpandAll;
       document.getElementById('title').textContent = message.title;
       document.getElementById('path').textContent = message.pathLabel;
+      jsonlBar.classList.toggle('hidden', !message.jsonl);
+      if (message.jsonl) applyJsonlState(message.jsonl);
       const hasTruncatedFields = message.truncatedFieldCount > 0;
       searchScopeWarning.classList.toggle('hidden', !hasTruncatedFields);
       searchInput.placeholder = hasTruncatedFields
@@ -518,6 +773,17 @@ export class JsonTreePanel {
 
     expandAllButton.addEventListener('click', () => runTreeOperation(true));
     collapseAllButton.addEventListener('click', () => runTreeOperation(false));
+    previousJsonlButton.addEventListener('click', () => vscode.postMessage({ type: 'previousJsonl' }));
+    nextJsonlButton.addEventListener('click', () => vscode.postMessage({ type: 'nextJsonl' }));
+    goJsonlButton.addEventListener('click', goToJsonlLine);
+    jsonlLineInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        goToJsonlLine();
+      }
+    });
+    revealSourceButton.addEventListener('click', () => vscode.postMessage({ type: 'revealSource' }));
+    followCursorInput.addEventListener('change', () => vscode.postMessage({ type: 'setFollowCursor', enabled: followCursorInput.checked }));
 
     document.addEventListener('click', hideMenu);
     document.addEventListener('scroll', hideMenu, true);
@@ -756,6 +1022,27 @@ export class JsonTreePanel {
       searchInput.disabled = treeOperationRunning;
     }
 
+    function applyJsonlState(state) {
+      jsonlLineInput.value = String(state.lineNumber);
+      jsonlTotal.textContent = ' / ' + Number(state.lineCount).toLocaleString();
+      followCursorInput.checked = state.followCursor === true;
+      jsonlStatus.textContent = state.status || '';
+      const busy = state.busy === true;
+      previousJsonlButton.disabled = busy;
+      nextJsonlButton.disabled = busy;
+      jsonlLineInput.disabled = busy;
+      goJsonlButton.disabled = busy;
+    }
+
+    function goToJsonlLine() {
+      const lineNumber = Number(jsonlLineInput.value);
+      if (!Number.isInteger(lineNumber) || lineNumber < 1) {
+        jsonlLineInput.focus();
+        return;
+      }
+      vscode.postMessage({ type: 'goToJsonlLine', lineNumber });
+    }
+
     function createNode(key, model, edgeInfo) {
       const node = document.createElement('div');
       node.className = 'node';
@@ -764,6 +1051,8 @@ export class JsonTreePanel {
       const row = document.createElement('div');
       row.className = 'row';
       const expandable = model.type === 'object' || model.type === 'array';
+      row.setAttribute('aria-label', key + ': ' + model.type);
+      row.title = model.type.charAt(0).toUpperCase() + model.type.slice(1);
       const toggle = document.createElement('span');
       toggle.className = 'toggle' + (expandable ? '' : ' empty');
       toggle.textContent = expandable ? '▸' : '';
@@ -784,21 +1073,17 @@ export class JsonTreePanel {
       appendValue(row, model);
       if ((edgeInfo && (edgeInfo.keyTruncated || edgeInfo.rawKeyTruncated)) || model.rawTruncated || model.valueTruncated) {
         const truncatedBadge = document.createElement('span');
-        truncatedBadge.className = 'badge truncated-badge';
+        truncatedBadge.className = 'truncated-note';
         const lengths = [];
         if (edgeInfo && edgeInfo.keyTruncated) lengths.push(edgeInfo.keyLength);
         if (edgeInfo && edgeInfo.rawKeyTruncated) lengths.push(edgeInfo.rawKeyLength);
         if (model.rawTruncated) lengths.push(model.rawLength);
         if (model.valueTruncated) lengths.push(model.valueLength);
         const longest = Math.max(...lengths);
-        truncatedBadge.textContent = 'truncated · ' + longest.toLocaleString() + ' chars';
+        truncatedBadge.textContent = '… ' + longest.toLocaleString() + ' chars';
         truncatedBadge.title = 'Only the beginning and end are displayed and searched. Copy/open actions use the complete value.';
         row.appendChild(truncatedBadge);
       }
-      const badge = document.createElement('span');
-      badge.className = 'badge';
-      badge.textContent = model.type;
-      row.appendChild(badge);
       node.appendChild(row);
 
       let children;
@@ -844,7 +1129,7 @@ export class JsonTreePanel {
             performance.now() - startedAt < 8
           ) {
             const child = modelChildren[nextChildIndex];
-            const label = typeof child.key === 'number' ? '[' + child.key + ']' : child.key;
+            const label = String(child.key);
             const childNode = createNode(label, child.value, {
               hasKey: true,
               hasRawKey: child.rawKey !== undefined,
@@ -908,7 +1193,7 @@ export class JsonTreePanel {
       if (model.type === 'object' || model.type === 'array') {
         span.className = 'summary';
         const count = (model.children || []).length;
-        span.textContent = model.type === 'array' ? 'Array(' + count + ')' : 'Object(' + count + ')';
+        span.textContent = model.type === 'array' ? '[' + count + ']' : '{' + count + '}';
       } else {
         span.className = 'value ' + model.type;
         span.textContent = model.raw;
@@ -928,6 +1213,7 @@ export class JsonTreePanel {
       if (model.type === 'string') {
         addMenuItem('Open as nested JSON tree', () => vscode.postMessage({ type: 'openNested', nodeId: model.id }));
         addMenuItem('Open parsed JSON in new editor', () => vscode.postMessage({ type: 'openParsedJson', nodeId: model.id }));
+        addMenuItem('Open decoded string value in new editor', () => vscode.postMessage({ type: 'openDecodedValue', nodeId: model.id }));
         addSeparator();
         addMenuItem('Copy raw JSON string (escaped)', () => vscode.postMessage({ type: 'copyRawString', nodeId: model.id }));
         addMenuItem('Copy decoded string value', () => vscode.postMessage({ type: 'copyDecodedString', nodeId: model.id }));
@@ -970,7 +1256,14 @@ export class JsonTreePanel {
   }
 }
 
-function isPanelMessage(value: unknown): value is { type: string; nodeId?: unknown } {
+interface PanelMessage {
+  type: string;
+  nodeId?: unknown;
+  lineNumber?: unknown;
+  enabled?: unknown;
+}
+
+function isPanelMessage(value: unknown): value is PanelMessage {
   return (
     value !== null &&
     typeof value === "object" &&

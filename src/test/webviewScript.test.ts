@@ -52,6 +52,7 @@ test("Webview actions send only host-resolved node IDs", () => {
   for (const type of [
     "openNested",
     "openParsedJson",
+    "openDecodedValue",
     "copyValue",
     "copyRawString",
     "copyDecodedString",
@@ -82,6 +83,40 @@ test("nested Tree Views open as new tabs in the source editor group", () => {
   assert.match(source, /viewColumn: vscode\.ViewColumn\.Beside,/);
 });
 
+test("JSONL Tree Views expose in-panel record navigation", () => {
+  for (const id of [
+    "jsonl-bar",
+    "previous-jsonl",
+    "next-jsonl",
+    "jsonl-line",
+    "jsonl-total",
+    "go-jsonl",
+    "reveal-source",
+    "follow-cursor",
+    "jsonl-status",
+  ]) {
+    assert.match(source, new RegExp(`id="${id}"`));
+  }
+  for (const type of [
+    "previousJsonl",
+    "nextJsonl",
+    "goToJsonlLine",
+    "revealSource",
+    "setFollowCursor",
+  ]) {
+    assert.match(source, new RegExp(`type: '${type}'`));
+  }
+  assert.match(source, /findJsonlRecord/);
+  assert.match(source, /onDidChangeTextEditorSelection/);
+  assert.match(source, /setTimeout\(\(\) => void this\.followSourceLine\(lineNumber\), 150\)/);
+});
+
+test("Tree rows use compact container counts without visual type badges", () => {
+  assert.match(source, /\? '\[' \+ count \+ '\]' : '\{' \+ count \+ '\}'/);
+  assert.doesNotMatch(source, /badge\.textContent = model\.type/);
+  assert.match(source, /row\.setAttribute\('aria-label', key \+ ': ' \+ model\.type\)/);
+});
+
 test("Webview model truncation is explicit and limits search scope", () => {
   assert.match(source, /createJsonTreeWebviewModel\(candidate\.tree\)/);
   assert.match(source, /const displayPath = formatJsonPathForDisplay\(materializeJsonTreePath\(context\)\)/);
@@ -89,7 +124,7 @@ test("Webview model truncation is explicit and limits search scope", () => {
   assert.match(source, /truncatedFieldCount: this\.webviewModel\.truncatedFieldCount/);
   assert.match(source, /Search displayed text \(long values shortened\)/);
   assert.match(source, /copy and open actions still use the complete host value/i);
-  assert.match(source, /truncated · /);
+  assert.match(source, /'… ' \+ longest\.toLocaleString\(\) \+ ' chars'/);
 });
 
 test("bulk tree operations are iterative, chunked, and size-limited", () => {
@@ -188,6 +223,15 @@ test("oversized roots stay collapsed and manual expansion materializes cancellab
     "empty-search",
     "title",
     "path",
+    "jsonl-bar",
+    "previous-jsonl",
+    "next-jsonl",
+    "jsonl-line",
+    "jsonl-total",
+    "go-jsonl",
+    "reveal-source",
+    "follow-cursor",
+    "jsonl-status",
   ];
   const elements = new Map(elementIds.map((id) => [id, new FakeElement()]));
   const windowListeners = new Map<string, Array<(event: { data: unknown }) => void>>();

@@ -43,12 +43,28 @@ async function openCurrentLine(): Promise<void> {
   const text = editor.document.lineAt(lineNumber).text;
   if (!checkSize(text)) return;
   const sourceName = documentName(editor.document);
-  await parseAndOpen(text, `JSON Tree · ${sourceName}:${lineNumber + 1}`, `line ${lineNumber + 1}`);
+  await parseAndOpen(
+    text,
+    `JSON Tree · ${sourceName}:${lineNumber + 1}`,
+    `line ${lineNumber + 1}`,
+    {
+      uri: editor.document.uri,
+      sourceName,
+      lineNumber,
+      lineCount: editor.document.lineCount,
+      followCursor: false,
+    },
+  );
 }
 
-async function parseAndOpen(text: string, title: string, place: string): Promise<void> {
+async function parseAndOpen(
+  text: string,
+  title: string,
+  place: string,
+  jsonlSource?: Parameters<typeof JsonTreePanel.create>[5],
+): Promise<void> {
   try {
-    await openCandidates(parseJsonCandidates(text), title, place);
+    await openCandidates(parseJsonCandidates(text), title, place, jsonlSource);
   } catch (error) {
     if (error instanceof JsonProcessingLimitError) {
       void vscode.window.showErrorMessage(error.message);
@@ -58,14 +74,26 @@ async function parseAndOpen(text: string, title: string, place: string): Promise
   }
 }
 
-async function openCandidates(candidates: JsonCandidate[], title: string, place: string): Promise<void> {
+async function openCandidates(
+  candidates: JsonCandidate[],
+  title: string,
+  place: string,
+  jsonlSource?: Parameters<typeof JsonTreePanel.create>[5],
+): Promise<void> {
   if (candidates.length === 0) {
     void vscode.window.showErrorMessage(`No valid JSON object, array, or value was found in the ${place}.`);
     return;
   }
   const selected = await pickCandidate(candidates, place);
   if (selected !== undefined) {
-    JsonTreePanel.create(selected, title, pickCandidate);
+    JsonTreePanel.create(
+      selected,
+      title,
+      pickCandidate,
+      jsonlSource === undefined ? "$" : `$ · line ${jsonlSource.lineNumber + 1}`,
+      vscode.ViewColumn.Beside,
+      jsonlSource,
+    );
   }
 }
 

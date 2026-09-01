@@ -16,16 +16,17 @@
 
 Nested JSON Tree is a read-only viewer for the JSON that ordinary formatters struggle with: JSON hidden inside log lines, one record in a JSONL file, or an escaped JSON string nested several levels deep.
 
-![Search inside a JSON tree](assets/screenshots/tree-search.png)
+<a href="assets/screenshots/tree-search.png"><img src="assets/screenshots/tree-search.png" width="1000" alt="Search inside a JSON tree"></a>
 
 ## Highlights
 
 - Open a JSON/JSONC document as a collapsible tree.
 - Accept JSONC line/block comments and trailing commas.
 - Extract valid JSON even when unrelated text appears before or after it.
-- Read and open only the current JSONL/NDJSON line, without loading the whole document into the parser.
+- Navigate valid JSONL/NDJSON records in one Tree View without loading the whole document into the parser.
 - Right-click a string and recursively open escaped or double-encoded JSON.
 - Decode, parse, format, and open nested JSON in a normal untitled editor.
+- Open any decoded string as plain text, preserving real newlines and other decoded characters without requiring JSON.
 - Preserve large integers and original tokens such as `"\u0061"` and `"\/"` in display, search, copy, and formatting.
 - Search decoded and raw keys/values incrementally, filter unrelated branches, and navigate results.
 - Copy lossless values, decoded strings, exact escaped string literals, JSONPath, and jq filters.
@@ -36,15 +37,17 @@ Nested JSON Tree is a read-only viewer for the JSON that ordinary formatters str
 
 Right-click any string node to open JSON encoded inside it. The new tree supports the same actions, so nesting can be explored repeatedly.
 
-![Open escaped nested JSON](assets/screenshots/nested-json-menu.png)
+<a href="assets/screenshots/nested-json-menu.png"><img src="assets/screenshots/nested-json-menu.png" width="1000" alt="Open escaped nested JSON"></a>
 
-You can also choose **Open parsed JSON in new editor** to decode and format the value as a normal JSON document.
+Choose **Open parsed JSON in new editor** to decode and format the value as a normal JSON document, or **Open decoded string value in new editor** to open the decoded text unchanged in a plain-text editor.
 
 ## JSONL / NDJSON
 
 Place the cursor on a record and select **Nested JSON Tree: Open Current Line as Tree** from the editor context menu or Command Palette.
 
-![Open the current JSONL line](assets/screenshots/jsonl-current-line.png)
+<a href="assets/screenshots/jsonl-current-line.png"><img src="assets/screenshots/jsonl-current-line.png" width="1000" alt="Navigate a JSONL file"></a>
+
+The Tree View keeps the source URI and current line. Use **Prev**, **Next**, or a line number to jump between valid records in the same tab; empty, invalid, and resource-limited lines are skipped. **Source** reveals the current record in the editor. **Follow cursor** is optional and off by default.
 
 Editor context-menu entries appear only for JSON/JSONC and JSONL/NDJSON files. Both commands remain available through `Cmd+Shift+P` / `Ctrl+Shift+P` for text and log files.
 
@@ -59,7 +62,7 @@ Editor context-menu entries appear only for JSON/JSONC and JSONL/NDJSON files. B
 Or install from the command line:
 
 ```sh
-code --install-extension nested-json-tree-0.4.0.vsix
+code --install-extension nested-json-tree-0.5.0.vsix
 ```
 
 ## Commands
@@ -76,6 +79,7 @@ code --install-extension nested-json-tree-0.4.0.vsix
 - `Enter` and `Shift+Enter` move through search results.
 - `Esc` clears search and restores the previous expansion state.
 - Right-click a node to copy its value, key, JSONPath, or jq path.
+- String-node actions can open parsed JSON or open the decoded value unchanged as plain text.
 
 Example jq path:
 
