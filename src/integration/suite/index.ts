@@ -33,12 +33,16 @@ async function verifyOpenDocumentCommand(): Promise<void> {
   });
   await vscode.window.showTextDocument(document, { preview: false });
 
-  const existingTabs = new Set(viewerTabs());
+  const expectedLabel = "JSON Tree · Untitled";
+  const existingCount = viewerTabs().filter((tab) => tab.label === expectedLabel).length;
   await vscode.commands.executeCommand(OPEN_DOCUMENT_COMMAND);
-  const tab = await waitForNewViewerTab(existingTabs);
+  const tab = await waitForViewerTab(
+    (candidate) => candidate.label === expectedLabel,
+    existingCount,
+  );
 
   assert.equal(isViewerViewType(tab.input.viewType), true);
-  assert.match(tab.label, /^JSON Tree/);
+  assert.equal(tab.label, expectedLabel);
 }
 
 async function verifyOpenCurrentLineCommand(): Promise<void> {
@@ -49,12 +53,16 @@ async function verifyOpenCurrentLineCommand(): Promise<void> {
   const editor = await vscode.window.showTextDocument(document, { preview: false });
   editor.selection = new vscode.Selection(1, 0, 1, 0);
 
-  const existingTabs = new Set(viewerTabs());
+  const expectedLabel = "JSON Tree · Untitled:2";
+  const existingCount = viewerTabs().filter((tab) => tab.label === expectedLabel).length;
   await vscode.commands.executeCommand(OPEN_CURRENT_LINE_COMMAND);
-  const tab = await waitForNewViewerTab(existingTabs);
+  const tab = await waitForViewerTab(
+    (candidate) => candidate.label === expectedLabel,
+    existingCount,
+  );
 
   assert.equal(isViewerViewType(tab.input.viewType), true);
-  assert.match(tab.label, /:2$/);
+  assert.equal(tab.label, expectedLabel);
 }
 
 function viewerTabs(): Array<vscode.Tab & { input: vscode.TabInputWebview }> {
@@ -70,14 +78,15 @@ function isViewerViewType(viewType: unknown): viewType is string {
   return typeof viewType === "string" && (viewType === VIEW_TYPE || viewType.endsWith(`-${VIEW_TYPE}`));
 }
 
-async function waitForNewViewerTab(
-  existingTabs: ReadonlySet<vscode.Tab>,
+async function waitForViewerTab(
+  matchesExpectedTab: (tab: vscode.Tab & { input: vscode.TabInputWebview }) => boolean,
+  existingCount: number,
   timeoutMs = 10_000,
 ): Promise<vscode.Tab & { input: vscode.TabInputWebview }> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const tab = viewerTabs().find((candidate) => !existingTabs.has(candidate));
-    if (tab !== undefined) return tab;
+    const matchingTabs = viewerTabs().filter(matchesExpectedTab);
+    if (matchingTabs.length > existingCount) return matchingTabs[matchingTabs.length - 1];
     await delay(50);
   }
   const visibleTabs = vscode.window.tabGroups.all
