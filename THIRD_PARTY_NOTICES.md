@@ -1,6 +1,14 @@
-MIT License
+# Third-Party Notices
 
-Copyright (c) 2026 stevelee477
+Nested JSON Tree includes software from the following project.
+
+## jsonc-parser
+
+Source: https://github.com/microsoft/node-jsonc-parser
+
+The MIT License (MIT)
+
+Copyright (c) Microsoft
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

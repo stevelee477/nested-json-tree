@@ -21,12 +21,14 @@ Nested JSON Tree is a read-only viewer for the JSON that ordinary formatters str
 ## Highlights
 
 - Open a JSON/JSONC document as a collapsible tree.
+- Accept JSONC line/block comments and trailing commas.
 - Extract valid JSON even when unrelated text appears before or after it.
-- Open the current JSONL/NDJSON line without parsing the whole file as one document.
+- Read and open only the current JSONL/NDJSON line, without loading the whole document into the parser.
 - Right-click a string and recursively open escaped or double-encoded JSON.
 - Decode, parse, format, and open nested JSON in a normal untitled editor.
-- Search keys and primitive values, filter unrelated branches, and navigate results.
-- Copy values, decoded strings, escaped JSON string literals, JSONPath, and jq filters.
+- Preserve large integers and original tokens such as `"\u0061"` and `"\/"` in display, search, copy, and formatting.
+- Search decoded and raw keys/values incrementally, filter unrelated branches, and navigate results.
+- Copy lossless values, decoded strings, exact escaped string literals, JSONPath, and jq filters.
 - Choose between multiple detected JSON candidates.
 - Automatically expand small trees; keep large trees manageable.
 
@@ -57,7 +59,7 @@ Editor context-menu entries appear only for JSON/JSONC and JSONL/NDJSON files. B
 Or install from the command line:
 
 ```sh
-code --install-extension nested-json-tree-0.3.1.vsix
+code --install-extension nested-json-tree-0.4.0.vsix
 ```
 
 ## Commands
@@ -69,7 +71,7 @@ code --install-extension nested-json-tree-0.3.1.vsix
 
 ## Tree controls
 
-- **Expand all / Collapse all** controls every container at once.
+- **Expand all / Collapse all** controls every container at once; **Expand all** is limited to 10,000 nodes.
 - `Cmd+F` / `Ctrl+F` focuses tree search.
 - `Enter` and `Shift+Enter` move through search results.
 - `Esc` clears search and restores the previous expansion state.
@@ -85,14 +87,19 @@ Example jq path:
 
 | Setting | Default | Description |
 | --- | ---: | --- |
-| `nestedJsonTree.autoExpandMaxNodes` | `200` | Fully expand trees at or below this node count. Set to `0` to expand only the root. |
+| `nestedJsonTree.autoExpandMaxNodes` | `200` | Fully expand trees at or below this node count. Set to `0` to disable automatic descendant expansion; roots above the 10,000-node materialization limit remain collapsed. |
 
 ## Parsing boundaries
 
 - Maximum input size: 100 MB.
-- Unrelated prefix and suffix text is supported.
+- Safety limits: 1,024 nesting levels, 100,000 value nodes in total, 5,000 extracted candidates, and 50,000 potential container spans.
+- Common log prefixes and suffixes are supported. Extraction from ambiguous combinations of unmatched quotes/comments is best-effort.
+- JSONC comments and trailing commas are accepted; opening parsed JSON in an editor produces strict JSON.
+- Number and string tokens, key escapes, key order, and duplicate keys are preserved.
 - Empty `{}` and `[]` extraction candidates are ignored.
 - Structurally broken JSON, such as missing quotes or braces, is not repaired.
+- Pretty output that would exceed 16 Mi characters falls back to compact JSON; clipboard/editor output above 50 Mi characters is rejected.
+- Long key/value tokens and displayed UI paths are shortened to at most 10,000 characters. Search covers the shortened Tree View fields; copy and nested-open actions still use complete Host-side data.
 - The tree is read-only; parsed JSON can be opened in a separate editor for editing.
 
 ## Development
@@ -100,6 +107,7 @@ Example jq path:
 ```sh
 npm install
 npm test
+npm run test:integration
 npm run package
 ```
 

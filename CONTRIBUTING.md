@@ -7,6 +7,7 @@ Thanks for helping improve Nested JSON Tree.
 ```sh
 npm install
 npm test
+npm run test:integration
 ```
 
 Press `F5` in VS Code to launch an Extension Development Host. Use the synthetic files in `examples/` for manual testing.

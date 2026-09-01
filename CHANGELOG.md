@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0
+
+- Added JSONC parsing with line/block comments and trailing commas.
+- Replaced repeated delimiter rescanning with a bounded linear candidate scan for malformed input.
+- Added explicit nesting, node, candidate, scan, and serialized-output limits so hostile input fails clearly instead of exhausting memory or surfacing an inner fragment as the complete value.
+- Ignored JSON-looking values inside balanced prefix strings/comments while retaining recovery for unmatched log syntax.
+- Preserved large-number tokens, original string/key escapes, and duplicate object keys throughout Tree View display, search, copy, and parsed-editor formatting.
+- Derived context-menu values and paths from a Host-side node index, flagged duplicate-key paths as ambiguous, bounded exceptionally long Webview fields and UI paths, and measured copy-path output before allocation while retaining full Host-side copy/open behavior.
+- Fixed jq filters for root-array items (`.[0]`) and root object keys that require quoting (`.["x-y"]`).
+- Changed the JSONL/NDJSON command to read and size-check only the current line.
+- Moved search and tree materialization into incremental Webview chunks and capped **Expand all** at 10,000 nodes to avoid blocking the Extension Host.
+- Added real VS Code Extension Host smoke tests and a bundle-integrity regression test.
+- Hardened CI and Release workflows with pinned Action SHAs, least-privilege publishing, dependency auditing, and full-history privacy checks.
+
 ## 0.3.1
 
 - Added a custom JSON braces and tree icon, with an editable SVG source and packaged PNG asset.

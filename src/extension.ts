@@ -3,7 +3,7 @@ import * as vscode from "vscode";
 import {
   InputTooLargeError,
   JsonCandidate,
-  JsonValue,
+  JsonProcessingLimitError,
   assertInputSize,
   candidatePreview,
   parseJsonCandidates,
@@ -29,7 +29,7 @@ async function openDocument(): Promise<void> {
   const text = editor.document.getText();
   if (!checkSize(text)) return;
   const sourceName = documentName(editor.document);
-  await openCandidates(parseJsonCandidates(text), `JSON Tree · ${sourceName}`, "document");
+  await parseAndOpen(text, `JSON Tree · ${sourceName}`, "document");
 }
 
 async function openCurrentLine(): Promise<void> {
@@ -39,16 +39,23 @@ async function openCurrentLine(): Promise<void> {
     return;
   }
 
-  const documentText = editor.document.getText();
-  if (!checkSize(documentText)) return;
   const lineNumber = editor.selection.active.line;
   const text = editor.document.lineAt(lineNumber).text;
+  if (!checkSize(text)) return;
   const sourceName = documentName(editor.document);
-  await openCandidates(
-    parseJsonCandidates(text),
-    `JSON Tree · ${sourceName}:${lineNumber + 1}`,
-    `line ${lineNumber + 1}`,
-  );
+  await parseAndOpen(text, `JSON Tree · ${sourceName}:${lineNumber + 1}`, `line ${lineNumber + 1}`);
+}
+
+async function parseAndOpen(text: string, title: string, place: string): Promise<void> {
+  try {
+    await openCandidates(parseJsonCandidates(text), title, place);
+  } catch (error) {
+    if (error instanceof JsonProcessingLimitError) {
+      void vscode.window.showErrorMessage(error.message);
+      return;
+    }
+    throw error;
+  }
 }
 
 async function openCandidates(candidates: JsonCandidate[], title: string, place: string): Promise<void> {
@@ -62,8 +69,11 @@ async function openCandidates(candidates: JsonCandidate[], title: string, place:
   }
 }
 
-async function pickCandidate(candidates: JsonCandidate[], place: string): Promise<JsonValue | undefined> {
-  if (candidates.length === 1) return candidates[0].value;
+async function pickCandidate(
+  candidates: JsonCandidate[],
+  place: string,
+): Promise<JsonCandidate | undefined> {
+  if (candidates.length === 1) return candidates[0];
 
   const items = candidates.map((candidate, index) => ({
     label: `$(json) JSON candidate ${index + 1}`,
@@ -76,7 +86,7 @@ async function pickCandidate(candidates: JsonCandidate[], place: string): Promis
     placeHolder: `${candidates.length} valid JSON values found`,
     matchOnDetail: true,
   });
-  return selected?.candidate.value;
+  return selected?.candidate;
 }
 
 function checkSize(text: string): boolean {

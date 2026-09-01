@@ -5,29 +5,63 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan full Git history for private identifiers
+        run: bash .github/scripts/check-private-history.sh
+      - name: Verify tag matches package version
+        run: node -e "const version=require('./package.json').version; if (process.env.GITHUB_REF_NAME !== 'v'+version) throw new Error('Tag must be v'+version)"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm audit --audit-level=high
       - run: npm test
-      - name: Verify tag matches package version
-        run: node -e "const version=require('./package.json').version; if (process.env.GITHUB_REF_NAME !== 'v'+version) throw new Error('Tag must be v'+version)"
+      - name: Test in VS Code Extension Host
+        run: xvfb-run -a npm run test:integration
+        env:
+          VSCODE_TEST_VERSION: "1.90.0"
       - name: Package VSIX
         run: |
           mkdir -p dist
           npm run package -- --out "dist/nested-json-tree-${GITHUB_REF_NAME#v}.vsix"
           cd dist
           sha256sum *.vsix > SHA256SUMS.txt
-      - uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets-${{ github.ref_name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets-${{ github.ref_name }}
+          path: dist
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           generate_release_notes: true
           files: |

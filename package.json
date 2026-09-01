@@ -2,7 +2,7 @@
   "name": "nested-json-tree",
   "displayName": "Nested JSON Tree",
   "description": "Open JSON, JSONL lines, and escaped JSON strings as recursive tree views.",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "publisher": "local-dev",
   "icon": "assets/icon.png",
   "author": {
@@ -50,7 +50,7 @@
           "default": 200,
           "minimum": 0,
           "maximum": 10000,
-          "markdownDescription": "Automatically expand every object and array when the JSON contains at most this many value nodes. Set to `0` to expand only the root node."
+          "markdownDescription": "Automatically expand every object and array when the JSON contains at most this many value nodes. Set to `0` to disable automatic descendant expansion. Roots above the 10,000-node materialization limit remain collapsed."
         }
       }
     },
@@ -102,15 +102,22 @@
     }
   },
   "scripts": {
-    "compile": "tsc -p ./",
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./ && esbuild src/extension.ts --bundle --platform=node --format=cjs --main-fields=module,main --external:vscode --sourcemap --outfile=out/extension.js",
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node --test out/test/*.test.js",
+    "test:integration": "npm run compile && node out/integration/runTest.js",
     "package": "vsce package --no-dependencies --allow-missing-repository"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.90.0",
+    "@vscode/test-electron": "3.1.0",
     "@vscode/vsce": "^3.6.0",
+    "esbuild": "^0.28.2",
     "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "jsonc-parser": "^3.3.1"
   }
 }

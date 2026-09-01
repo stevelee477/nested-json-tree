@@ -21,12 +21,14 @@ Nested JSON Tree 专门处理普通格式化工具不擅长的 JSON：日志行�
 ## 主要功能
 
 - 将 JSON/JSONC 文档打开为可折叠的树。
+- 支持 JSONC 的行注释、块注释和尾逗号。
 - JSON 前后有日志或其他无关文字时，仍可提取完整 JSON。
-- 只解析 JSONL/NDJSON 光标所在行，不把整个文件当作一个 JSON。
+- 只读取并解析 JSONL/NDJSON 光标所在行，不把整个文档送入解析器。
 - 右键字符串，递归打开转义或重复编码的嵌套 JSON。
 - 将嵌套 JSON 反转义、解析并格式化到普通编辑器。
-- 搜索字段名和基础值，过滤无关分支并逐个跳转结果。
-- 复制值、解码字符串、原始转义字符串、JSONPath 和 jq 路径。
+- 大整数以及 `"\u0061"`、`"\/"` 这样的原始 token 在显示、搜索、复制和格式化时都不会失真。
+- 分片搜索解码值与原始字段/值，过滤无关分支并逐个跳转结果。
+- 复制无损值、解码字符串、完全原样的转义字符串、JSONPath 和 jq 路径。
 - 检出多个 JSON 时弹出候选列表。
 - 小树自动展开，大树保持易于浏览。
 
@@ -57,7 +59,7 @@ Nested JSON Tree 专门处理普通格式化工具不擅长的 JSON：日志行�
 也可以使用命令行：
 
 ```sh
-code --install-extension nested-json-tree-0.3.1.vsix
+code --install-extension nested-json-tree-0.4.0.vsix
 ```
 
 ## 命令
@@ -69,7 +71,7 @@ code --install-extension nested-json-tree-0.3.1.vsix
 
 ## Tree View 操作
 
-- **Expand all / Collapse all**：一次展开或收起全部容器。
+- **Expand all / Collapse all**：一次展开或收起全部容器；**Expand all** 上限为 10,000 个节点。
 - `Cmd+F` / `Ctrl+F`：聚焦搜索框。
 - `Enter` / `Shift+Enter`：跳转下一个或上一个结果。
 - `Esc`：清空搜索并恢复搜索前的展开状态。
@@ -85,14 +87,19 @@ jq 路径示例：
 
 | 设置项 | 默认值 | 说明 |
 | --- | ---: | --- |
-| `nestedJsonTree.autoExpandMaxNodes` | `200` | 节点数不超过此值时自动完全展开；设为 `0` 时只展开根节点。 |
+| `nestedJsonTree.autoExpandMaxNodes` | `200` | 节点数不超过此值时自动完全展开；设为 `0` 时禁用后代自动展开，超过 10,000 个节点的根节点仍保持折叠。 |
 
 ## 解析边界
 
 - 输入文件最大 100 MB。
-- 支持 JSON 前后的无关内容。
+- 安全上限：最多 1,024 层嵌套、合计 100,000 个值节点、5,000 个提取候选和 50,000 个潜在容器片段。
+- 支持常见日志前后缀；如果无关内容同时混有多组未闭合引号或注释，提取只能尽力而为。
+- 支持 JSONC 注释和尾逗号；打开到编辑器时会输出严格 JSON。
+- 保留数字和字符串 token、字段名转义、字段顺序与重复字段。
 - 提取候选时忽略空对象 `{}` 和空数组 `[]`。
 - 不修复缺少引号、括号等结构损坏。
+- 格式化结果超过 16 Mi 字符时自动改用紧凑 JSON；复制或打开到编辑器的内容超过 50 Mi 字符时会拒绝操作。
+- 超长字段名、值和界面路径最多显示 10,000 个首尾字符。搜索只覆盖 Tree View 中缩短后的字段；复制和嵌套打开仍使用 Extension Host 中的完整数据。
 - Tree View 只读；需要编辑时可将解析结果打开到独立编辑器。
 
 ## 开发
@@ -100,6 +107,7 @@ jq 路径示例：
 ```sh
 npm install
 npm test
+npm run test:integration
 npm run package
 ```
 

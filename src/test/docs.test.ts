@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { PackageManager, listFiles } from "@vscode/vsce";
 
 const root = path.resolve(__dirname, "../..");
 
@@ -32,3 +33,25 @@ for (const readme of ["README.md", "README.zh-CN.md"]) {
     }
   });
 }
+
+test("package includes the complete jsonc-parser license notice", async () => {
+  const notices = readFileSync(path.join(root, "THIRD_PARTY_NOTICES.md"), "utf8");
+  const dependencyLicense = readFileSync(
+    path.join(root, "node_modules/jsonc-parser/LICENSE.md"),
+    "utf8",
+  );
+  assert.ok(
+    notices.replace(/\r\n/g, "\n").includes(dependencyLicense.replace(/\r\n/g, "\n").trim()),
+    "THIRD_PARTY_NOTICES.md must contain jsonc-parser's complete license text",
+  );
+
+  const packagedFiles = await listFiles({
+    cwd: root,
+    packageManager: PackageManager.None,
+    packagedDependencies: [],
+  });
+  assert.ok(
+    packagedFiles.includes("THIRD_PARTY_NOTICES.md"),
+    "THIRD_PARTY_NOTICES.md must be included by .vscodeignore",
+  );
+});

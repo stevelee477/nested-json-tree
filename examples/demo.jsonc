@@ -1,0 +1,7 @@
+{
+  // JSONC comments and trailing commas are accepted.
+  "requestId": 9007199254740993,
+  "escapedLetter": "\u0061",
+  "escapedSlash": "\/",
+  "payload": "{\"nestedId\":9007199254740995,\"ok\":true}",
+}

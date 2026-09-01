@@ -2,5 +2,6 @@ node_modules/
 out/
 work/
 outputs/
+.vscode-test/
 *.vsix
 .DS_Store

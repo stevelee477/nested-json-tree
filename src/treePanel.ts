@@ -1,33 +1,69 @@
 import * as vscode from "vscode";
-import { JsonValue, encodeJsonStringLiteral, parseNestedJsonCandidates } from "./parser";
-import { formatJqPath } from "./paths";
-import { searchJson } from "./search";
-import { shouldAutoExpand } from "./treeOptions";
+import {
+  JsonCandidate,
+  JsonProcessingLimitError,
+  parseNestedJsonCandidates,
+} from "./parser";
+import {
+  JsonTreeNodeContext,
+  JsonTreeOutputTooLargeError,
+  assertTransferTextSize,
+  buildJsonTreeContextIndex,
+  createJsonTreeWebviewModel,
+  isValidJsonTreeNodeId,
+  materializeJsonTreePath,
+  stringifyJsonTreeForTransfer,
+} from "./jsonTree";
+import {
+  formatJqPathForTransfer,
+  formatJsonPathForDisplay,
+  formatJsonPathForTransfer,
+} from "./paths";
+import {
+  advanceJsonTreeSearch,
+  createJsonTreeSearchState,
+  jsonTreePrimitiveSearchText,
+} from "./search";
+import {
+  MAX_EXPAND_ALL_NODES,
+  isTreeNodeCountWithinLimit,
+  shouldAutoExpandTree,
+} from "./treeOptions";
 
 export type CandidatePicker = (
   candidates: ReturnType<typeof parseNestedJsonCandidates>,
   place: string,
-) => Promise<JsonValue | undefined>;
+) => Promise<JsonCandidate | undefined>;
 
-interface PanelMessage {
-  type:
-    | "ready"
-    | "openNested"
-    | "openParsedJson"
-    | "search"
-    | "copy"
-    | "copyEscapedString"
-    | "copyJqPath";
-  value?: string;
-  path?: Array<string | number>;
-  text?: string;
-  query?: string;
-  requestId?: number;
-}
+type NodeAction =
+  | "openNested"
+  | "openParsedJson"
+  | "copyValue"
+  | "copyRawString"
+  | "copyDecodedString"
+  | "copyKey"
+  | "copyRawKey"
+  | "copyJsonPath"
+  | "copyJqPath";
+
+const NODE_ACTIONS = new Set<NodeAction>([
+  "openNested",
+  "openParsedJson",
+  "copyValue",
+  "copyRawString",
+  "copyDecodedString",
+  "copyKey",
+  "copyRawKey",
+  "copyJsonPath",
+  "copyJqPath",
+]);
 
 export class JsonTreePanel {
+  private readonly nodeContexts: Map<number, JsonTreeNodeContext>;
+  private readonly webviewModel: ReturnType<typeof createJsonTreeWebviewModel>;
+
   static create(
-    value: JsonValue,
+    candidate: JsonCandidate,
     title: string,
     pickCandidate: CandidatePicker,
     pathLabel = "$",
@@ -38,99 +74,209 @@ export class JsonTreePanel {
       vscode.ViewColumn.Beside,
       { enableScripts: true, retainContextWhenHidden: true },
     );
-    return new JsonTreePanel(panel, value, title, pathLabel, pickCandidate);
+    return new JsonTreePanel(panel, candidate, title, pathLabel, pickCandidate);
   }
 
   private constructor(
     private readonly panel: vscode.WebviewPanel,
-    private readonly value: JsonValue,
+    private readonly candidate: JsonCandidate,
     private readonly title: string,
     private readonly pathLabel: string,
     private readonly pickCandidate: CandidatePicker,
   ) {
-    panel.webview.onDidReceiveMessage((message: PanelMessage) => void this.handleMessage(message));
+    this.nodeContexts = buildJsonTreeContextIndex(candidate.tree);
+    this.webviewModel = createJsonTreeWebviewModel(candidate.tree);
+    panel.webview.onDidReceiveMessage((message: unknown) => void this.handleMessage(message));
     panel.webview.html = this.getHtml(panel.webview);
   }
 
-  private async handleMessage(message: PanelMessage): Promise<void> {
+  private async handleMessage(message: unknown): Promise<void> {
+    if (!isPanelMessage(message)) return;
+
     if (message.type === "ready") {
       const maxNodes = vscode.workspace
         .getConfiguration("nestedJsonTree")
         .get<number>("autoExpandMaxNodes", 200);
       await this.panel.webview.postMessage({
         type: "render",
-        value: this.value,
+        root: this.webviewModel.root,
         title: this.title,
         pathLabel: this.pathLabel,
-        autoExpand: shouldAutoExpand(this.value, maxNodes),
+        truncatedFieldCount: this.webviewModel.truncatedFieldCount,
+        autoExpand: shouldAutoExpandTree(this.candidate.tree, maxNodes),
+        canExpandAll: isTreeNodeCountWithinLimit(
+          this.candidate.tree,
+          MAX_EXPAND_ALL_NODES,
+        ),
+        expandAllLimit: MAX_EXPAND_ALL_NODES,
       });
       return;
     }
 
-    if (message.type === "copy" && typeof message.text === "string") {
-      await vscode.env.clipboard.writeText(message.text);
+    if (!isNodeAction(message.type) || !isValidJsonTreeNodeId(message.nodeId)) return;
+    const context = this.nodeContexts.get(message.nodeId);
+    if (context === undefined) return;
+    const node = context.node;
+
+    if (message.type === "copyKey") {
+      if (context.parent !== undefined && context.key !== undefined) {
+        const text = String(context.key);
+        try {
+          assertTransferTextSize(text);
+          await vscode.env.clipboard.writeText(text);
+        } catch (error) {
+          if (error instanceof JsonTreeOutputTooLargeError) {
+            void vscode.window.showErrorMessage(`Cannot copy key: ${error.message}`);
+            return;
+          }
+          throw error;
+        }
+      }
       return;
     }
 
-    if (message.type === "copyEscapedString" && typeof message.value === "string") {
-      await vscode.env.clipboard.writeText(encodeJsonStringLiteral(message.value));
+    if (message.type === "copyRawKey") {
+      if (context.rawKey !== undefined) {
+        try {
+          assertTransferTextSize(context.rawKey);
+          await vscode.env.clipboard.writeText(context.rawKey);
+        } catch (error) {
+          if (error instanceof JsonTreeOutputTooLargeError) {
+            void vscode.window.showErrorMessage(`Cannot copy raw key: ${error.message}`);
+            return;
+          }
+          throw error;
+        }
+      }
       return;
     }
 
-    if (message.type === "copyJqPath" && Array.isArray(message.path)) {
-      await vscode.env.clipboard.writeText(formatJqPath(message.path));
+    if (message.type === "copyJsonPath" || message.type === "copyJqPath") {
+      if (context.hasDuplicateKeyInPath) {
+        const syntax = message.type === "copyJsonPath" ? "JSONPath" : "jq path";
+        void vscode.window.showWarningMessage(
+          `Cannot copy ${syntax}: this path passes through a duplicate object key and is ambiguous.`,
+        );
+        return;
+      }
+      const path = materializeJsonTreePath(context);
+      try {
+        const text =
+          message.type === "copyJsonPath"
+            ? formatJsonPathForTransfer(path)
+            : formatJqPathForTransfer(path);
+        await vscode.env.clipboard.writeText(text);
+      } catch (error) {
+        if (error instanceof JsonTreeOutputTooLargeError) {
+          void vscode.window.showErrorMessage(`Cannot copy path: ${error.message}`);
+          return;
+        }
+        throw error;
+      }
       return;
     }
 
     if (
-      message.type === "search" &&
-      typeof message.query === "string" &&
-      typeof message.requestId === "number"
+      message.type === "copyValue" ||
+      message.type === "copyRawString" ||
+      message.type === "copyDecodedString"
     ) {
-      const result = searchJson(this.value, message.query);
-      await this.panel.webview.postMessage({
-        type: "searchResults",
-        requestId: message.requestId,
-        ...result,
-      });
+      try {
+        let text: string | undefined;
+        let compacted = false;
+        if (message.type === "copyValue") {
+          const serialized = stringifyJsonTreeForTransfer(node);
+          text = serialized.text;
+          compacted = serialized.compacted;
+        } else if (message.type === "copyRawString" && node.type === "string") {
+          text = node.raw as string;
+          assertTransferTextSize(text);
+        } else if (message.type === "copyDecodedString" && node.type === "string") {
+          text = node.value as string;
+          assertTransferTextSize(text);
+        }
+        if (text !== undefined) {
+          await vscode.env.clipboard.writeText(text);
+          if (compacted) {
+            void vscode.window.showInformationMessage(
+              "Copied compact JSON because pretty-formatted output would be too large.",
+            );
+          }
+        }
+      } catch (error) {
+        if (error instanceof JsonTreeOutputTooLargeError) {
+          void vscode.window.showErrorMessage(`Cannot copy value: ${error.message}`);
+          return;
+        }
+        throw error;
+      }
       return;
     }
 
-    if (
-      (message.type !== "openNested" && message.type !== "openParsedJson") ||
-      typeof message.value !== "string"
-    ) {
-      return;
+    if (message.type !== "openNested" && message.type !== "openParsedJson") return;
+    if (node.type !== "string") return;
+    const displayPath = formatJsonPathForDisplay(materializeJsonTreePath(context));
+    let candidates: ReturnType<typeof parseNestedJsonCandidates>;
+    try {
+      candidates = parseNestedJsonCandidates(node.value as string);
+    } catch (error) {
+      if (error instanceof JsonProcessingLimitError) {
+        void vscode.window.showErrorMessage(`Cannot open nested JSON at ${displayPath}: ${error.message}`);
+        return;
+      }
+      throw error;
     }
-
-    const jsonPath = formatJsonPath(message.path ?? []);
-    const candidates = parseNestedJsonCandidates(message.value);
     if (candidates.length === 0) {
-      void vscode.window.showWarningMessage(`The string at ${jsonPath} does not contain valid JSON.`);
+      void vscode.window.showWarningMessage(`The string at ${displayPath} does not contain valid JSON.`);
       return;
     }
 
-    const selected = await this.pickCandidate(candidates, jsonPath);
+    const selected = await this.pickCandidate(candidates, displayPath);
     if (selected === undefined) {
       return;
     }
 
     if (message.type === "openParsedJson") {
+      let serialized: ReturnType<typeof stringifyJsonTreeForTransfer>;
+      try {
+        serialized = stringifyJsonTreeForTransfer(selected.tree);
+      } catch (error) {
+        if (error instanceof JsonTreeOutputTooLargeError) {
+          void vscode.window.showErrorMessage(`Cannot open parsed JSON: ${error.message}`);
+          return;
+        }
+        throw error;
+      }
       const document = await vscode.workspace.openTextDocument({
-        content: JSON.stringify(selected, null, 2),
+        content: serialized.text,
         language: "json",
       });
       await vscode.window.showTextDocument(document, {
         preview: false,
         viewColumn: vscode.ViewColumn.Beside,
       });
+      if (serialized.compacted) {
+        void vscode.window.showInformationMessage(
+          "Opened compact JSON because pretty-formatted output would be too large.",
+        );
+      }
     } else {
-      JsonTreePanel.create(selected, `Nested JSON · ${jsonPath}`, this.pickCandidate, jsonPath);
+      JsonTreePanel.create(
+        selected,
+        `Nested JSON · ${displayPath}`,
+        this.pickCandidate,
+        displayPath,
+      );
     }
   }
 
   private getHtml(webview: vscode.Webview): string {
     const nonce = createNonce();
+    const searchRuntime = [
+      `const createJsonTreeSearchState = ${createJsonTreeSearchState.toString()};`,
+      `const jsonTreePrimitiveSearchText = ${jsonTreePrimitiveSearchText.toString()};`,
+      `const advanceJsonTreeSearch = ${advanceJsonTreeSearch.toString()};`,
+    ].join("\n");
     const csp = [
       "default-src 'none'",
       `style-src ${webview.cspSource} 'nonce-${nonce}'`,
@@ -194,6 +340,14 @@ export class JsonTreePanel {
     }
     #search-input:focus { border-color: var(--vscode-focusBorder); }
     #search-count { min-width: 72px; color: var(--vscode-descriptionForeground); text-align: right; white-space: nowrap; }
+    #search-scope-warning {
+      max-width: 260px;
+      overflow: hidden;
+      color: var(--vscode-editorWarning-foreground, var(--vscode-descriptionForeground));
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .search-button { width: 28px; padding: 0; font-family: var(--vscode-editor-font-family); }
     #tree { height: calc(100vh - 78px); padding: 8px 4px 24px 8px; overflow: auto; }
     .node { font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
@@ -238,6 +392,7 @@ export class JsonTreePanel {
       font-size: 10px;
       text-transform: uppercase;
     }
+    .truncated-badge { text-transform: none; }
     .children { margin-left: 18px; border-left: 1px solid var(--vscode-tree-indentGuidesStroke); padding-left: 1px; }
     .hidden { display: none !important; }
     #menu {
@@ -276,7 +431,8 @@ export class JsonTreePanel {
       </span>
     </div>
     <div class="search-bar" role="search">
-      <input id="search-input" type="search" placeholder="Search keys and values…" aria-label="Search JSON keys and values" spellcheck="false">
+      <input id="search-input" type="search" placeholder="Search keys and values…" aria-label="Search JSON keys and values" spellcheck="false" disabled>
+      <span id="search-scope-warning" class="hidden" title="Long keys and values are shortened in this view. Search covers the displayed prefix and suffix only; copy and open actions still use the complete host value.">Long values shortened · search is display-only</span>
       <span id="search-count" aria-live="polite"></span>
       <button class="header-button search-button" id="previous-match" type="button" title="Previous match (Shift+Enter)" disabled>↑</button>
       <button class="header-button search-button" id="next-match" type="button" title="Next match (Enter)" disabled>↓</button>
@@ -287,10 +443,12 @@ export class JsonTreePanel {
   <div id="empty-search" class="hidden">No matches</div>
   <div id="menu" class="hidden" role="menu"></div>
   <script nonce="${nonce}">
+    ${searchRuntime}
     const vscode = acquireVsCodeApi();
     const tree = document.getElementById('tree');
     const menu = document.getElementById('menu');
     const searchInput = document.getElementById('search-input');
+    const searchScopeWarning = document.getElementById('search-scope-warning');
     const searchCount = document.getElementById('search-count');
     const previousMatchButton = document.getElementById('previous-match');
     const nextMatchButton = document.getElementById('next-match');
@@ -299,23 +457,44 @@ export class JsonTreePanel {
     const collapseAllButton = document.getElementById('collapse-all');
     const emptySearch = document.getElementById('empty-search');
     let rootNode;
+    let currentRoot;
     let searchTimer;
     let searchActive = false;
     let latestSearchRequest = 0;
     let matchRows = [];
     let activeMatchIndex = -1;
+    let expandAllAllowed = false;
+    let activeTreeOperation = 0;
+    let treeOperationRunning = false;
+    const MATERIALIZE_CHILD_CHUNK_SIZE = 200;
 
     window.addEventListener('message', (event) => {
       const message = event.data;
-      if (message.type === 'searchResults') {
-        applySearchResults(message);
-        return;
-      }
       if (message.type !== 'render') return;
+      activeTreeOperation += 1;
+      latestSearchRequest += 1;
+      treeOperationRunning = false;
+      currentRoot = message.root;
+      expandAllAllowed = message.canExpandAll;
       document.getElementById('title').textContent = message.title;
       document.getElementById('path').textContent = message.pathLabel;
-      rootNode = createNode('$', message.value, [], true, message.autoExpand);
+      const hasTruncatedFields = message.truncatedFieldCount > 0;
+      searchScopeWarning.classList.toggle('hidden', !hasTruncatedFields);
+      searchInput.placeholder = hasTruncatedFields
+        ? 'Search displayed text (long values shortened)…'
+        : 'Search keys and values…';
+      expandAllButton.title = expandAllAllowed
+        ? 'Expand every object and array'
+        : 'Expand all is unavailable because this tree exceeds ' + message.expandAllLimit.toLocaleString() + ' nodes';
+      rootNode = createNode('$', currentRoot, undefined);
       tree.replaceChildren(rootNode);
+      if (message.autoExpand && expandAllAllowed) {
+        runTreeOperation(true);
+      } else if (expandAllAllowed) {
+        runRootExpansion();
+      } else {
+        updateActionButtons();
+      }
     });
 
     searchInput.addEventListener('input', () => {
@@ -335,12 +514,8 @@ export class JsonTreePanel {
     nextMatchButton.addEventListener('click', () => selectRelativeMatch(1));
     clearSearchButton.addEventListener('click', clearSearch);
 
-    expandAllButton.addEventListener('click', () => {
-      if (rootNode && rootNode.setExpanded) rootNode.setExpanded(true, true);
-    });
-    collapseAllButton.addEventListener('click', () => {
-      if (rootNode && rootNode.setExpanded) rootNode.setExpanded(false, true);
-    });
+    expandAllButton.addEventListener('click', () => runTreeOperation(true));
+    collapseAllButton.addEventListener('click', () => runTreeOperation(false));
 
     document.addEventListener('click', hideMenu);
     document.addEventListener('scroll', hideMenu, true);
@@ -360,37 +535,72 @@ export class JsonTreePanel {
         resetSearchView();
         return;
       }
-      if (!searchActive && rootNode && rootNode.captureExpansion) {
-        rootNode.captureExpansion();
-      }
       searchActive = true;
-      expandAllButton.disabled = true;
-      collapseAllButton.disabled = true;
-      latestSearchRequest += 1;
+      activeTreeOperation += 1;
+      treeOperationRunning = false;
+      const requestId = ++latestSearchRequest;
       searchCount.textContent = 'Searching…';
-      vscode.postMessage({ type: 'search', query, requestId: latestSearchRequest });
+      previousMatchButton.disabled = true;
+      nextMatchButton.disabled = true;
+      emptySearch.classList.add('hidden');
+      updateActionButtons();
+      const state = createJsonTreeSearchState(currentRoot, query);
+      const processChunk = () => {
+        if (requestId !== latestSearchRequest || !searchActive) return;
+        if (advanceJsonTreeSearch(state, 2_000)) {
+          applySearchResults(state, requestId);
+        } else {
+          setTimeout(processChunk, 0);
+        }
+      };
+      processChunk();
     }
 
-    function applySearchResults(message) {
-      if (message.requestId !== latestSearchRequest || !searchActive || !rootNode) return;
-      const exactPaths = new Set();
-      const expandPaths = new Set();
-      for (const path of message.paths) {
-        exactPaths.add(pathKey(path));
-        for (let length = 0; length < path.length; length += 1) {
-          expandPaths.add(pathKey(path.slice(0, length)));
+    function applySearchResults(result, requestId) {
+      if (requestId !== latestSearchRequest || !searchActive || !rootNode) return;
+      const exactIds = new Set(result.matches);
+      const pending = [rootNode];
+      let index = 0;
+      const isCurrent = () => requestId === latestSearchRequest && searchActive;
+      const processChunk = () => {
+        if (!isCurrent()) return;
+        const startedAt = performance.now();
+        while (index < pending.length && performance.now() - startedAt < 8) {
+          const node = pending[index];
+          node.rememberExpansion();
+          const isMatchBranch = result.expandIds.has(node.nodeId);
+          node.applySearchState(exactIds.has(node.nodeId), isMatchBranch);
+          const finishCurrentNode = () => {
+            for (const childNode of node.getRenderedChildren()) pending.push(childNode);
+            index += 1;
+          };
+          if (
+            isMatchBranch &&
+            !node.ensureExpanded(isCurrent, () => {
+              if (!isCurrent()) return;
+              finishCurrentNode();
+              setTimeout(processChunk, 0);
+            })
+          ) {
+            return;
+          }
+          finishCurrentNode();
         }
-      }
-      rootNode.applySearch(exactPaths, expandPaths);
-      matchRows = Array.from(tree.querySelectorAll('.row.search-match'));
-      activeMatchIndex = -1;
-      const suffix = message.truncated ? '+' : '';
-      searchCount.textContent = matchRows.length + suffix + (matchRows.length === 1 ? ' match' : ' matches');
-      const hasMatches = matchRows.length > 0;
-      previousMatchButton.disabled = !hasMatches;
-      nextMatchButton.disabled = !hasMatches;
-      emptySearch.classList.toggle('hidden', hasMatches);
-      if (hasMatches) selectRelativeMatch(1);
+        if (index < pending.length) {
+          setTimeout(processChunk, 0);
+          return;
+        }
+        matchRows = Array.from(tree.querySelectorAll('.row.search-match'));
+        activeMatchIndex = -1;
+        const suffix = result.truncated ? '+' : '';
+        searchCount.textContent = matchRows.length + suffix + (matchRows.length === 1 ? ' match' : ' matches');
+        const hasMatches = matchRows.length > 0;
+        previousMatchButton.disabled = !hasMatches;
+        nextMatchButton.disabled = !hasMatches;
+        emptySearch.classList.toggle('hidden', hasMatches);
+        if (hasMatches) selectRelativeMatch(1);
+      };
+      processChunk();
     }
 
     function selectRelativeMatch(delta) {
@@ -412,8 +622,8 @@ export class JsonTreePanel {
     }
 
     function resetSearchView() {
-      latestSearchRequest += 1;
-      if (searchActive && rootNode && rootNode.clearSearch) rootNode.clearSearch();
+      const wasActive = searchActive;
+      const requestId = ++latestSearchRequest;
       searchActive = false;
       matchRows = [];
       activeMatchIndex = -1;
@@ -421,147 +631,316 @@ export class JsonTreePanel {
       previousMatchButton.disabled = true;
       nextMatchButton.disabled = true;
       clearSearchButton.disabled = true;
-      expandAllButton.disabled = false;
-      collapseAllButton.disabled = false;
       emptySearch.classList.add('hidden');
+      if (wasActive && rootNode) {
+        restoreSearchState(requestId);
+      } else {
+        updateActionButtons();
+      }
     }
 
-    function createNode(key, value, path, expanded, expandDescendants) {
+    function restoreSearchState(requestId) {
+      const operationId = ++activeTreeOperation;
+      treeOperationRunning = true;
+      updateActionButtons();
+      const pending = [rootNode];
+      let index = 0;
+      const isCurrent = () =>
+        requestId === latestSearchRequest && operationId === activeTreeOperation && !searchActive;
+      const processChunk = () => {
+        if (!isCurrent()) return;
+        const startedAt = performance.now();
+        while (index < pending.length && performance.now() - startedAt < 8) {
+          const node = pending[index];
+          const shouldExpand = node.restoreSearchState();
+          const finishCurrentNode = () => {
+            for (const childNode of node.getRenderedChildren()) pending.push(childNode);
+            index += 1;
+          };
+          if (
+            shouldExpand &&
+            !node.ensureExpanded(isCurrent, () => {
+              if (!isCurrent()) return;
+              finishCurrentNode();
+              setTimeout(processChunk, 0);
+            })
+          ) {
+            return;
+          }
+          finishCurrentNode();
+        }
+        if (index < pending.length) {
+          setTimeout(processChunk, 0);
+        } else {
+          treeOperationRunning = false;
+          updateActionButtons();
+        }
+      };
+      processChunk();
+    }
+
+    function runTreeOperation(shouldExpand) {
+      if (!rootNode || searchActive || (shouldExpand && !expandAllAllowed)) return;
+      const operationId = ++activeTreeOperation;
+      treeOperationRunning = true;
+      updateActionButtons();
+      const pending = [rootNode];
+      let index = 0;
+      const isCurrent = () => operationId === activeTreeOperation && !searchActive;
+      const processChunk = () => {
+        if (!isCurrent()) return;
+        const startedAt = performance.now();
+        while (index < pending.length && performance.now() - startedAt < 8) {
+          const node = pending[index];
+          const finishCurrentNode = () => {
+            for (const childNode of node.getRenderedChildren()) pending.push(childNode);
+            index += 1;
+          };
+          if (
+            shouldExpand &&
+            !node.ensureExpanded(isCurrent, () => {
+              if (!isCurrent()) return;
+              finishCurrentNode();
+              setTimeout(processChunk, 0);
+            })
+          ) {
+            return;
+          }
+          if (!shouldExpand) node.setExpanded(false);
+          finishCurrentNode();
+        }
+        if (index < pending.length) {
+          setTimeout(processChunk, 0);
+        } else {
+          treeOperationRunning = false;
+          updateActionButtons();
+        }
+      };
+      processChunk();
+    }
+
+    function runRootExpansion() {
+      if (!rootNode || !expandAllAllowed) return;
+      const operationId = ++activeTreeOperation;
+      treeOperationRunning = true;
+      updateActionButtons();
+      const isCurrent = () => operationId === activeTreeOperation && !searchActive;
+      const finish = () => {
+        if (!isCurrent()) return;
+        treeOperationRunning = false;
+        updateActionButtons();
+      };
+      if (rootNode.ensureExpanded(isCurrent, finish)) finish();
+    }
+
+    function toggleNodeManually(node) {
+      if (searchActive || treeOperationRunning) return;
+      const operationId = ++activeTreeOperation;
+      const shouldExpand = !node.isExpanded();
+      if (!shouldExpand) {
+        node.setExpanded(false);
+        return;
+      }
+      node.ensureExpanded(
+        () => operationId === activeTreeOperation && !searchActive,
+        () => {},
+      );
+    }
+
+    function updateActionButtons() {
+      expandAllButton.disabled = searchActive || treeOperationRunning || !expandAllAllowed;
+      // Collapse all also acts as a user-visible cancellation for an in-flight expansion.
+      collapseAllButton.disabled = searchActive;
+      searchInput.disabled = treeOperationRunning;
+    }
+
+    function createNode(key, model, edgeInfo) {
       const node = document.createElement('div');
       node.className = 'node';
+      if (searchActive) node.classList.add('search-hidden');
       node.setAttribute('role', 'treeitem');
       const row = document.createElement('div');
       row.className = 'row';
-      const expandable = value !== null && typeof value === 'object';
+      const expandable = model.type === 'object' || model.type === 'array';
       const toggle = document.createElement('span');
       toggle.className = 'toggle' + (expandable ? '' : ' empty');
-      toggle.textContent = expandable ? (expanded ? '▾' : '▸') : '';
+      toggle.textContent = expandable ? '▸' : '';
       row.appendChild(toggle);
 
       const keySpan = document.createElement('span');
       keySpan.className = 'key';
       keySpan.textContent = key;
+      if (edgeInfo && edgeInfo.keyTruncated) {
+        keySpan.title = 'Key shortened from ' + edgeInfo.keyLength.toLocaleString() + ' characters';
+      }
       row.appendChild(keySpan);
       const separator = document.createElement('span');
       separator.className = 'separator';
       separator.textContent = ':';
       row.appendChild(separator);
 
-      appendValue(row, value);
-      const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value === 'object' ? 'object' : typeof value;
+      appendValue(row, model);
+      if ((edgeInfo && (edgeInfo.keyTruncated || edgeInfo.rawKeyTruncated)) || model.rawTruncated || model.valueTruncated) {
+        const truncatedBadge = document.createElement('span');
+        truncatedBadge.className = 'badge truncated-badge';
+        const lengths = [];
+        if (edgeInfo && edgeInfo.keyTruncated) lengths.push(edgeInfo.keyLength);
+        if (edgeInfo && edgeInfo.rawKeyTruncated) lengths.push(edgeInfo.rawKeyLength);
+        if (model.rawTruncated) lengths.push(model.rawLength);
+        if (model.valueTruncated) lengths.push(model.valueLength);
+        const longest = Math.max(...lengths);
+        truncatedBadge.textContent = 'truncated · ' + longest.toLocaleString() + ' chars';
+        truncatedBadge.title = 'Only the beginning and end are displayed and searched. Copy/open actions use the complete value.';
+        row.appendChild(truncatedBadge);
+      }
       const badge = document.createElement('span');
       badge.className = 'badge';
-      badge.textContent = type;
+      badge.textContent = model.type;
       row.appendChild(badge);
       node.appendChild(row);
 
       let children;
-      let rendered = false;
+      let fullyMaterialized = false;
+      let nextChildIndex = 0;
+      let materializeGeneration = 0;
       let isExpanded = false;
-      let savedExpansion;
+      let savedExpansion = false;
+      let hasSavedExpansion = false;
       const childNodes = [];
-      const setExpanded = (shouldExpand, recursive = false) => {
+      const modelChildren = model.children || [];
+      const setExpanded = (shouldExpand) => {
         if (!expandable) return;
-        if (!rendered && shouldExpand) {
-          children = document.createElement('div');
-          children.className = 'children';
-          children.setAttribute('role', 'group');
-          const entries = Array.isArray(value) ? value.map((item, index) => [index, item]) : Object.entries(value);
-          for (const [childKey, childValue] of entries) {
-            const label = typeof childKey === 'number' ? '[' + childKey + ']' : childKey;
-            const childNode = createNode(
-              label,
-              childValue,
-              path.concat(childKey),
-              false,
-              false
-            );
-            childNodes.push(childNode);
-            children.appendChild(childNode);
-          }
-          node.appendChild(children);
-          rendered = true;
-        }
-        if (recursive && rendered) {
-          for (const childNode of childNodes) {
-            if (childNode.setExpanded) childNode.setExpanded(shouldExpand, true);
-          }
-        }
-        if (rendered) children.classList.toggle('hidden', !shouldExpand);
+        if (!shouldExpand) materializeGeneration += 1;
+        if (children) children.classList.toggle('hidden', !shouldExpand);
         isExpanded = shouldExpand;
         toggle.textContent = shouldExpand ? '▾' : '▸';
         node.setAttribute('aria-expanded', String(shouldExpand));
       };
+      const ensureExpanded = (isCurrent, onComplete) => {
+        if (!expandable) return true;
+        setExpanded(true);
+        if (fullyMaterialized) return true;
+        if (modelChildren.length === 0) {
+          fullyMaterialized = true;
+          return true;
+        }
+        if (!children) {
+          children = document.createElement('div');
+          children.className = 'children';
+          children.setAttribute('role', 'group');
+          node.appendChild(children);
+        }
+        const generation = ++materializeGeneration;
+        const processMaterializeChunk = () => {
+          if (generation !== materializeGeneration || !isCurrent() || !isExpanded) return;
+          const fragment = document.createDocumentFragment();
+          const startedAt = performance.now();
+          let createdInChunk = 0;
+          while (
+            nextChildIndex < modelChildren.length &&
+            createdInChunk < MATERIALIZE_CHILD_CHUNK_SIZE &&
+            performance.now() - startedAt < 8
+          ) {
+            const child = modelChildren[nextChildIndex];
+            const label = typeof child.key === 'number' ? '[' + child.key + ']' : child.key;
+            const childNode = createNode(label, child.value, {
+              hasKey: true,
+              hasRawKey: child.rawKey !== undefined,
+              keyTruncated: child.keyTruncated,
+              keyLength: child.keyLength,
+              rawKeyTruncated: child.rawKeyTruncated,
+              rawKeyLength: child.rawKeyLength,
+            });
+            childNodes.push(childNode);
+            fragment.appendChild(childNode);
+            nextChildIndex += 1;
+            createdInChunk += 1;
+          }
+          children.appendChild(fragment);
+          if (nextChildIndex < modelChildren.length) {
+            setTimeout(processMaterializeChunk, 0);
+          } else {
+            fullyMaterialized = true;
+            onComplete();
+          }
+        };
+        setTimeout(processMaterializeChunk, 0);
+        return false;
+      };
+      node.nodeId = model.id;
       node.setExpanded = setExpanded;
-      node.captureExpansion = () => {
-        savedExpansion = isExpanded;
-        if (rendered) {
-          for (const childNode of childNodes) childNode.captureExpansion();
+      node.ensureExpanded = ensureExpanded;
+      node.isExpanded = () => isExpanded;
+      node.getRenderedChildren = () => childNodes;
+      node.rememberExpansion = () => {
+        if (!hasSavedExpansion) {
+          savedExpansion = isExpanded;
+          hasSavedExpansion = true;
         }
       };
-      node.applySearch = (exactPaths, expandPaths) => {
-        const key = pathKey(path);
-        const isExactMatch = exactPaths.has(key);
-        const isMatchBranch = expandPaths.has(key);
+      node.applySearchState = (isExactMatch, isMatchBranch) => {
         node.classList.toggle('search-hidden', !isExactMatch && !isMatchBranch);
         row.classList.toggle('search-match', isExactMatch);
         row.classList.remove('active-match');
-        if (expandable) setExpanded(isMatchBranch, false);
-        if (rendered) {
-          for (const childNode of childNodes) childNode.applySearch(exactPaths, expandPaths);
-        }
+        if (expandable && !isMatchBranch) setExpanded(false);
       };
-      node.clearSearch = () => {
+      node.restoreSearchState = () => {
         node.classList.remove('search-hidden');
         row.classList.remove('search-match', 'active-match');
-        if (rendered) {
-          for (const childNode of childNodes) childNode.clearSearch();
-        }
-        if (expandable) setExpanded(savedExpansion ?? false, false);
-        savedExpansion = undefined;
+        if (!hasSavedExpansion) return expandable && isExpanded;
+        const shouldExpand = expandable && hasSavedExpansion && savedExpansion;
+        if (expandable && !shouldExpand) setExpanded(false);
+        hasSavedExpansion = false;
+        return shouldExpand;
       };
       if (expandable) {
-        setExpanded(expanded, expandDescendants);
-        row.addEventListener('click', () => {
-          if (!searchActive) setExpanded(toggle.textContent !== '▾');
-        });
+        node.setAttribute('aria-expanded', 'false');
+        row.addEventListener('click', () => toggleNodeManually(node));
       }
-      row.addEventListener('contextmenu', (event) => showMenu(event, key, value, path));
+      row.addEventListener('contextmenu', (event) => showMenu(event, model, edgeInfo));
       return node;
     }
 
-    function appendValue(row, value) {
+    function appendValue(row, model) {
       const span = document.createElement('span');
-      if (value !== null && typeof value === 'object') {
+      if (model.type === 'object' || model.type === 'array') {
         span.className = 'summary';
-        const count = Array.isArray(value) ? value.length : Object.keys(value).length;
-        span.textContent = Array.isArray(value) ? 'Array(' + count + ')' : 'Object(' + count + ')';
+        const count = (model.children || []).length;
+        span.textContent = model.type === 'array' ? 'Array(' + count + ')' : 'Object(' + count + ')';
       } else {
-        const type = value === null ? 'null' : typeof value;
-        span.className = 'value ' + type;
-        span.textContent = typeof value === 'string' ? JSON.stringify(value) : String(value);
-        if (typeof value === 'string') span.title = 'Right-click to open nested JSON';
+        span.className = 'value ' + model.type;
+        span.textContent = model.raw;
+        if (model.rawTruncated) {
+          span.title = 'Value shortened from ' + model.rawLength.toLocaleString() + ' characters; right-click actions use the complete value';
+        } else if (model.type === 'string') {
+          span.title = 'Right-click to inspect or copy this string';
+        }
       }
       row.appendChild(span);
     }
 
-    function showMenu(event, key, value, path) {
+    function showMenu(event, model, edgeInfo) {
       event.preventDefault();
       event.stopPropagation();
       menu.replaceChildren();
-      if (typeof value === 'string') {
-        addMenuItem('Open as nested JSON tree', () => vscode.postMessage({ type: 'openNested', value, path }));
-        addMenuItem('Open parsed JSON in new editor', () => vscode.postMessage({ type: 'openParsedJson', value, path }));
+      if (model.type === 'string') {
+        addMenuItem('Open as nested JSON tree', () => vscode.postMessage({ type: 'openNested', nodeId: model.id }));
+        addMenuItem('Open parsed JSON in new editor', () => vscode.postMessage({ type: 'openParsedJson', nodeId: model.id }));
         addSeparator();
-        addMenuItem('Copy raw JSON string (escaped)', () => vscode.postMessage({ type: 'copyEscapedString', value }));
-        addMenuItem('Copy decoded string value', () => vscode.postMessage({ type: 'copy', text: value }));
+        addMenuItem('Copy raw JSON string (escaped)', () => vscode.postMessage({ type: 'copyRawString', nodeId: model.id }));
+        addMenuItem('Copy decoded string value', () => vscode.postMessage({ type: 'copyDecodedString', nodeId: model.id }));
         addSeparator();
       } else {
-        addMenuItem('Copy value', () => vscode.postMessage({ type: 'copy', text: stringifyValue(value) }));
+        addMenuItem('Copy value', () => vscode.postMessage({ type: 'copyValue', nodeId: model.id }));
       }
-      if (path.length > 0) addMenuItem('Copy key', () => vscode.postMessage({ type: 'copy', text: String(key) }));
-      addMenuItem('Copy JSON path', () => vscode.postMessage({ type: 'copy', text: formatPath(path) }));
-      addMenuItem('Copy jq path', () => vscode.postMessage({ type: 'copyJqPath', path }));
+      if (edgeInfo && edgeInfo.hasKey) {
+        addMenuItem('Copy key', () => vscode.postMessage({ type: 'copyKey', nodeId: model.id }));
+      }
+      if (edgeInfo && edgeInfo.hasRawKey) {
+        addMenuItem('Copy raw key token', () => vscode.postMessage({ type: 'copyRawKey', nodeId: model.id }));
+      }
+      addMenuItem('Copy JSON path', () => vscode.postMessage({ type: 'copyJsonPath', nodeId: model.id }));
+      addMenuItem('Copy jq path', () => vscode.postMessage({ type: 'copyJqPath', nodeId: model.id }));
       menu.classList.remove('hidden');
       const rect = menu.getBoundingClientRect();
       menu.style.left = Math.max(4, Math.min(event.clientX, window.innerWidth - rect.width - 4)) + 'px';
@@ -581,14 +960,6 @@ export class JsonTreePanel {
       menu.appendChild(separator);
     }
     function hideMenu() { menu.classList.add('hidden'); }
-    function stringifyValue(value) { return typeof value === 'string' ? value : JSON.stringify(value, null, 2); }
-    function pathKey(path) { return JSON.stringify(path); }
-    function formatPath(path) {
-      return '$' + path.map((segment) => typeof segment === 'number'
-        ? '[' + segment + ']'
-        : /^[A-Za-z_$][\\w$]*$/.test(segment) ? '.' + segment : '[' + JSON.stringify(segment) + ']'
-      ).join('');
-    }
 
     vscode.postMessage({ type: 'ready' });
   </script>
@@ -597,13 +968,18 @@ export class JsonTreePanel {
   }
 }
 
-function formatJsonPath(path: Array<string | number>): string {
-  return `$${path
-    .map((segment) => {
-      if (typeof segment === "number") return `[${segment}]`;
-      return /^[A-Za-z_$][\w$]*$/.test(segment) ? `.${segment}` : `[${JSON.stringify(segment)}]`;
-    })
-    .join("")}`;
+function isPanelMessage(value: unknown): value is { type: string; nodeId?: unknown } {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.prototype.hasOwnProperty.call(value, "type") &&
+    typeof (value as { type?: unknown }).type === "string"
+  );
+}
+
+function isNodeAction(value: string): value is NodeAction {
+  return NODE_ACTIONS.has(value as NodeAction);
 }
 
 function createNonce(): string {
