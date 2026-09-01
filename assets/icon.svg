@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="Nested JSON Tree icon">
+  <rect x="12" y="12" width="232" height="232" rx="52" fill="#15192D"/>
+  <rect x="18" y="18" width="220" height="220" rx="46" fill="none" stroke="#2A3151" stroke-width="4"/>
+
+  <g fill="none" stroke="#AAB4D6" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M78 51C64 51 59 61 59 75V94C59 109 53 116 42 120C53 124 59 131 59 146V181C59 195 64 205 78 205"/>
+    <path d="M178 51C192 51 197 61 197 75V94C197 109 203 116 214 120C203 124 197 131 197 146V181C197 195 192 205 178 205"/>
+  </g>
+
+  <g fill="none" stroke="#59DDF2" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M128 85V123M96 123H160M96 123V161M160 123V161"/>
+  </g>
+
+  <circle cx="128" cy="73" r="15" fill="#F4FBFF" stroke="#59DDF2" stroke-width="7"/>
+  <circle cx="96" cy="173" r="15" fill="#F4FBFF" stroke="#59DDF2" stroke-width="7"/>
+  <circle cx="160" cy="173" r="15" fill="#F4FBFF" stroke="#59DDF2" stroke-width="7"/>
+</svg>

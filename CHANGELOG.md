@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- Added a custom JSON braces and tree icon, with an editable SVG source and packaged PNG asset.
+
 ## 0.3.0
 
 - Added case-insensitive Tree View search across keys and primitive values.

@@ -2,8 +2,9 @@
   "name": "nested-json-tree",
   "displayName": "Nested JSON Tree",
   "description": "Open JSON, JSONL lines, and escaped JSON strings as recursive tree views.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "local-dev",
+  "icon": "assets/icon.png",
   "license": "MIT",
   "engines": {
     "vscode": "^1.90.0"
