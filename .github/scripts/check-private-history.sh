@@ -2,6 +2,7 @@
 set -euo pipefail
 
 export LC_ALL=C
+export GIT_NO_REPLACE_OBJECTS=1
 
 readonly EXPECTED_NAME="stevelee477"
 readonly EXPECTED_EMAIL="hi.whoareyou12@gmail.com"
@@ -33,19 +34,36 @@ fi
 audit_tmp="$(mktemp -d)"
 trap 'rm -rf -- "$audit_tmp"' EXIT
 
-is_allowed_email() {
+is_allowed_github_noreply_email() {
   local email="$1"
 
-  if [[ "$email" == "$EXPECTED_EMAIL" || "$email" == "noreply@github.com" ]]; then
+  if [[ "$email" == "noreply@github.com" ]]; then
     return 0
   fi
 
   [[ "$email" =~ ^([0-9]+\+)?[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?(\[bot\])?@users\.noreply\.github\.com$ ]]
 }
 
+is_allowed_commit_identity() {
+  local name="$1"
+  local email="$2"
+
+  [[ "$name" == "$EXPECTED_NAME" && "$email" == "$EXPECTED_EMAIL" ]] || is_allowed_github_noreply_email "$email"
+}
+
+is_allowed_content_email() {
+  local email="$1"
+
+  [[ "$email" == "$EXPECTED_EMAIL" || "$email" == "support@github.com" ]] || is_allowed_github_noreply_email "$email"
+}
+
 scan_repository_content() {
   local content_file="$1"
+  local email_scan_mode="${2:-text-only}"
   local email
+  local email_matches
+  local email_tokens
+  local grep_status
 
   if grep -aFqi -- "$DENIED_CORPORATE_MARKER" "$content_file" || grep -aFqi -- "$DENIED_LOCAL_USER" "$content_file"; then
     denied_identifier_issues=$((denied_identifier_issues + 1))
@@ -58,15 +76,23 @@ scan_repository_content() {
   # Compressed image/archive bytes can coincidentally resemble an email. Scan
   # email tokens only in text; local-path byte sequences remain checked above
   # for every blob. Binary release assets receive a separate archive audit.
-  if ! grep -Iq . "$content_file"; then
+  if [[ "$email_scan_mode" == "text-only" ]] && ! grep -Iq . "$content_file"; then
     return
   fi
 
+  email_matches="$audit_tmp/email-matches"
+  email_tokens="$audit_tmp/email-tokens"
+  grep_status=0
+  grep -aEo -- "$EMAIL_PATTERN" "$content_file" > "$email_matches" || grep_status=$?
+  if (( grep_status > 1 )); then
+    return "$grep_status"
+  fi
+  sort -fu "$email_matches" > "$email_tokens"
   while IFS= read -r email; do
-    if ! is_allowed_email "$email"; then
+    if ! is_allowed_content_email "$email"; then
       email_issues=$((email_issues + 1))
     fi
-  done < <(grep -aEo -- "$EMAIL_PATTERN" "$content_file" | sort -fu || true)
+  done < "$email_tokens"
 }
 
 scan_npm_sources() {
@@ -227,19 +253,49 @@ npm_file_kind() {
   esac
 }
 
+# Full-history CI checkouts include automated remote branches. Keep exact
+# project identity on release-bearing history while allowing GitHub noreply
+# identities only on commits reachable exclusively from other refs.
+strict_history_refs=()
+for ref in refs/heads/main refs/remotes/origin/main; do
+  if git show-ref --verify --quiet "$ref"; then
+    strict_history_refs+=("$ref")
+  fi
+done
+
+tag_refs="$audit_tmp/tag-refs"
+git for-each-ref --format='%(refname)' refs/tags > "$tag_refs"
+while IFS= read -r tag_ref; do
+  strict_history_refs+=("$tag_ref")
+done < "$tag_refs"
+
+if (( ${#strict_history_refs[@]} == 0 )); then
+  printf '%s\n' "Privacy audit failed: main history and tags are unavailable." >&2
+  exit 1
+fi
+
+strict_history_commits="$audit_tmp/strict-history-commits"
+git rev-list "${strict_history_refs[@]}" | sort -u > "$strict_history_commits"
+all_history_commits="$audit_tmp/all-history-commits"
+git rev-list --all | sort -u > "$all_history_commits"
+
 while IFS= read -r commit; do
   author_name="$(git show -s --format='%an' "$commit" 2>/dev/null)"
   author_email="$(git show -s --format='%ae' "$commit" 2>/dev/null)"
   committer_name="$(git show -s --format='%cn' "$commit" 2>/dev/null)"
   committer_email="$(git show -s --format='%ce' "$commit" 2>/dev/null)"
 
-  if [[ "$author_name" != "$EXPECTED_NAME"
-      || "$author_email" != "$EXPECTED_EMAIL"
-      || "$committer_name" != "$EXPECTED_NAME"
-      || "$committer_email" != "$EXPECTED_EMAIL" ]]; then
+  if grep -Fqx -- "$commit" "$strict_history_commits"; then
+    if [[ "$author_name" != "$EXPECTED_NAME"
+        || "$author_email" != "$EXPECTED_EMAIL"
+        || "$committer_name" != "$EXPECTED_NAME"
+        || "$committer_email" != "$EXPECTED_EMAIL" ]]; then
+      commit_identity_issues=$((commit_identity_issues + 1))
+    fi
+  elif ! is_allowed_commit_identity "$author_name" "$author_email" || ! is_allowed_commit_identity "$committer_name" "$committer_email"; then
     commit_identity_issues=$((commit_identity_issues + 1))
   fi
-done < <(git rev-list --all)
+done < "$all_history_commits"
 
 object_metadata="$audit_tmp/object-metadata"
 git cat-file --batch-all-objects --batch-check='%(objectname) %(objecttype)' > "$object_metadata"
@@ -250,10 +306,55 @@ while IFS=' ' read -r object_id object_type; do
       git cat-file blob "$object_id" > "$audit_tmp/stored-content" 2>/dev/null
       scan_repository_content "$audit_tmp/stored-content"
       ;;
+    commit)
+      git cat-file commit "$object_id" > "$audit_tmp/stored-content" 2>/dev/null
+      # Commit and tag objects are structured metadata, so scan email tokens
+      # even if a malformed object contains NUL bytes.
+      scan_repository_content "$audit_tmp/stored-content" "always"
+      ;;
     tag)
-      tagger_line="$(git cat-file tag "$object_id" 2>/dev/null | sed -n 's/^tagger //p' | head -n 1)"
+      git cat-file tag "$object_id" > "$audit_tmp/stored-content" 2>/dev/null
+      scan_repository_content "$audit_tmp/stored-content" "always"
+      tagger_line=""
+      tagger_line_count=0
+      tag_header_line_number=0
+      tag_header_terminated=0
+      tag_header_valid=1
+      while IFS= read -r header_line; do
+        if [[ -z "$header_line" ]]; then
+          tag_header_terminated=1
+          break
+        fi
+        tag_header_line_number=$((tag_header_line_number + 1))
+        [[ "$header_line" != *$'\r'* ]] || tag_header_valid=0
+        case "$tag_header_line_number" in
+          1)
+            [[ "$header_line" == object\ ?* ]] || tag_header_valid=0
+            ;;
+          2)
+            [[ "$header_line" == type\ ?* ]] || tag_header_valid=0
+            ;;
+          3)
+            [[ "$header_line" == tag\ ?* ]] || tag_header_valid=0
+            ;;
+          4)
+            if [[ "$header_line" == tagger\ ?* ]]; then
+              tagger_line="${header_line#tagger }"
+              tagger_line_count=$((tagger_line_count + 1))
+            else
+              tag_header_valid=0
+            fi
+            ;;
+          *)
+            tag_header_valid=0
+            ;;
+        esac
+      done < "$audit_tmp/stored-content"
       tagger_identity="$(printf '%s\n' "$tagger_line" | sed -E 's/ [0-9]+ [+-][0-9]{4}$//')"
-      if [[ "$tagger_identity" != "$EXPECTED_NAME <$EXPECTED_EMAIL>" ]]; then
+      if (( tag_header_valid != 1
+          || tag_header_terminated != 1
+          || tag_header_line_number != 4
+          || tagger_line_count != 1 )) || [[ "$tagger_identity" != "$EXPECTED_NAME <$EXPECTED_EMAIL>" ]]; then
         tag_identity_issues=$((tag_identity_issues + 1))
       fi
       ;;
@@ -261,8 +362,10 @@ while IFS=' ' read -r object_id object_type; do
 done < "$object_metadata"
 
 seen_npm_objects="$audit_tmp/seen-npm-objects"
+commit_tree_entries="$audit_tmp/commit-tree-entries"
 : > "$seen_npm_objects"
 while IFS= read -r commit; do
+  git ls-tree -r -z "$commit" > "$commit_tree_entries"
   while IFS= read -r -d '' tree_entry; do
     metadata="${tree_entry%%$'\t'*}"
     repository_path="${tree_entry#*$'\t'}"
@@ -281,9 +384,11 @@ while IFS= read -r commit; do
 
     git cat-file blob "$object_id" > "$audit_tmp/npm-content" 2>/dev/null
     scan_npm_sources "$kind" "$audit_tmp/npm-content"
-  done < <(git ls-tree -r -z "$commit")
-done < <(git rev-list --all)
+  done < "$commit_tree_entries"
+done < "$all_history_commits"
 
+worktree_files="$audit_tmp/worktree-files"
+git ls-files -co --exclude-standard -z > "$worktree_files"
 while IFS= read -r -d '' repository_path; do
   if [[ -L "$repository_path" ]]; then
     readlink "$repository_path" > "$audit_tmp/worktree-content"
@@ -298,7 +403,7 @@ while IFS= read -r -d '' repository_path; do
   if [[ -n "$kind" ]]; then
     scan_npm_sources "$kind" "$audit_tmp/worktree-content"
   fi
-done < <(git ls-files -co --exclude-standard -z)
+done < "$worktree_files"
 
 if (( commit_identity_issues > 0
       || tag_identity_issues > 0
