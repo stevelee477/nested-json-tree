@@ -88,3 +88,14 @@ test("does not hide unexpected parser errors", async () => {
     /unexpected/,
   );
 });
+
+
+test("JSONL navigation includes recoverable lines and multiple values on a line", async () => {
+  const result = await findJsonlRecord(lines("noise", '{"id":1,"bad":oops} {"next":2}'), 0, 1);
+  assert.equal(result.status, "found");
+  if (result.status !== "found") return;
+  assert.equal(result.record.lineNumber, 1);
+  assert.deepEqual(result.record.candidates.map((candidate) => candidate.value), [{ id: 1 }, { next: 2 }]);
+  assert.ok(result.record.candidates[0].recovery);
+  assert.equal(result.record.candidates[1].recovery, undefined);
+});

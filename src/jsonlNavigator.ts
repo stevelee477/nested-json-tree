@@ -31,8 +31,8 @@ export interface JsonlNavigationOptions {
 const DEFAULT_SCAN_BATCH_SIZE = 250;
 
 /**
- * Finds one valid JSONL record without joining or parsing the full document.
- * Empty, invalid, and resource-limited lines are skipped. Work is yielded in
+ * Finds one complete or partially recoverable JSONL record without joining or parsing the full document.
+ * Empty, unrecoverable, and resource-limited lines are skipped. Work is yielded in
  * bounded batches so a long invalid region does not monopolize the Extension
  * Host event loop.
  */

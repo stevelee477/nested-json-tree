@@ -1,4 +1,12 @@
-import { ParseError, SyntaxKind, createScanner, parseTree } from "jsonc-parser";
+import {
+  Node as JsoncNode,
+  ParseError,
+  ParseErrorCode,
+  SyntaxKind,
+  createScanner,
+  parseTree,
+  printParseErrorCode,
+} from "jsonc-parser";
 import { JsonTreeNode, buildJsonTree, jsonTreeToValue } from "./jsonTree";
 
 export type JsonPrimitive = null | boolean | number | string;
@@ -15,6 +23,19 @@ export interface JsonCandidate {
   start: number;
   end: number;
   unwrapDepth: number;
+  /** Present only for a recovered subset; raw remains the damaged source. */
+  recovery?: JsonRecovery;
+}
+
+export interface JsonRecovery {
+  errorCount: number;
+  /** Bounded diagnostics, with offsets relative to candidate.raw. */
+  issues: Array<{ code: string; offset: number; length: number }>;
+}
+
+export interface JsonParseOptions {
+  /** Disable to extract only complete JSON/JSONC values. Defaults to true. */
+  allowPartial?: boolean;
 }
 
 export const MAX_INPUT_BYTES = 100 * 1024 * 1024;
@@ -85,7 +106,7 @@ export function assertInputSize(text: string): void {
  * Parses an entire JSON value when possible. If the text contains unrelated
  * prefixes/suffixes, it scans for balanced object/array candidates instead.
  */
-export function parseJsonCandidates(text: string): JsonCandidate[] {
+export function parseJsonCandidates(text: string, options: JsonParseOptions = {}): JsonCandidate[] {
   const bounds = trimmedBounds(text);
   let attemptedWholeDocument = false;
   if (bounds.start < bounds.end) {
@@ -112,10 +133,12 @@ export function parseJsonCandidates(text: string): JsonCandidate[] {
   // The recovery view ignores that prefix syntax, then filters candidates
   // wholly contained in balanced strict-view strings/comments.
   let recoveryCandidates: JsonCandidate[];
+  let recoverySpans: ContainerSpan[] = [];
   try {
+    recoverySpans = scanContainerSpans(text, false).spans;
     recoveryCandidates = parseContainerSpans(
       text,
-      scanContainerSpans(text, false).spans,
+      recoverySpans,
       bounds,
       attemptedWholeDocument,
     );
@@ -132,10 +155,194 @@ export function parseJsonCandidates(text: string): JsonCandidate[] {
     throw error;
   }
 
-  if (strictCandidates.length === 0) return recoveryCandidates;
-  const merged = mergeCandidateViews(strictCandidates, recoveryCandidates);
+  const complete = strictCandidates.length === 0
+    ? recoveryCandidates
+    : mergeCandidateViews(strictCandidates, recoveryCandidates);
+  const merged = options.allowPartial === false
+    ? complete
+    : recoverPartialCandidates(text, [...strictScan.spans, ...recoverySpans], strictScan.prefixSyntaxRanges, complete);
   assertCandidateNodeTotal(merged);
   return merged;
+}
+
+/** Recover only explicit syntax-tree fields, never invent values or repair tokens. */
+function recoverPartialCandidates(
+  text: string,
+  spans: ContainerSpan[],
+  prefixRanges: TextRange[],
+  complete: JsonCandidate[],
+): JsonCandidate[] {
+  let merged = [...complete];
+  const ordered = spans.sort((left, right) => left.start - right.start);
+  let lastStart = -1;
+  let acceptedEnd = -1;
+  let remainingCharacters = text.length * MAX_OVERLAPPING_PARSE_FACTOR;
+  let rangeIndex = 0;
+  for (const span of ordered) {
+    if (span.start === lastStart) continue;
+    lastStart = span.start;
+    if (span.start < acceptedEnd) continue;
+    let end = span.end ?? text.length;
+    while (rangeIndex < prefixRanges.length && prefixRanges[rangeIndex].end <= span.start) rangeIndex += 1;
+    const prefixRange = prefixRanges[rangeIndex];
+    // Never recover a value from a balanced prefix quote/comment, even if the
+    // permissive scanner lost its closing delimiter.
+    if (prefixRange && span.start >= prefixRange.start && span.start < prefixRange.end) continue;
+    if (merged.some((candidate) => candidate.start <= span.start && candidate.end >= end)) continue;
+    const parse = (): ReturnType<typeof tryParsePartial> => {
+      const length = end - span.start;
+      if (length <= 0 || length > remainingCharacters) return undefined;
+      remainingCharacters -= length;
+      return tryParsePartial(text.slice(span.start, end));
+    };
+    let parsed = parse();
+    if (!parsed) continue;
+    // A broken outer value must not swallow a later complete record or an
+    // inner candidate that the tolerant parser did not actually retain.
+    const unretained = merged.find((candidate) =>
+      candidate.start >= span.start && candidate.start < span.start + parsed!.length &&
+      !parsed!.containerRanges.some((range) =>
+        span.start + range.start === candidate.start && span.start + range.end === candidate.end,
+      ),
+    );
+    if (unretained) {
+      end = unretained.start;
+      parsed = parse();
+      if (!parsed) continue;
+    }
+    const candidate: JsonCandidate = {
+      value: jsonTreeToValue(parsed.tree),
+      tree: parsed.tree,
+      nodeCount: parsed.nodeCount,
+      raw: text.slice(span.start, span.start + parsed.length),
+      start: span.start,
+      end: span.start + parsed.length,
+      unwrapDepth: 0,
+      recovery: parsed.recovery,
+    };
+    const overlapping = merged.filter((item) => item.start < candidate.end && candidate.start < item.end);
+    if (overlapping.some((item) => item.start < candidate.start || item.end > candidate.end)) continue;
+    merged = merged.filter((item) => !overlapping.includes(item));
+    merged.push(candidate);
+    if (merged.length > MAX_JSON_CANDIDATES) throw new JsonCandidateLimitError();
+    assertCandidateNodeTotal(merged);
+    acceptedEnd = candidate.end;
+  }
+  return merged.sort((left, right) => left.start - right.start);
+}
+
+function tryParsePartial(raw: string): {
+  tree: JsonTreeNode;
+  nodeCount: number;
+  length: number;
+  recovery: JsonRecovery;
+  containerRanges: TextRange[];
+} | undefined {
+  const errors: ParseError[] = [];
+  assertJsonComplexityWithinLimits(raw);
+  let root: JsoncNode | undefined;
+  try {
+    root = parseTree(raw, errors, { allowTrailingComma: true, disallowComments: false });
+  } catch (error) {
+    if (error instanceof RangeError) throw new JsonNestingTooDeepError();
+    throw error;
+  }
+  if (!root || root.offset !== 0 || errors.length === 0 ||
+      (root.type !== "object" && root.type !== "array")) return undefined;
+
+  const tokenErrors = errors.filter((error) =>
+    error.error === ParseErrorCode.InvalidSymbol ||
+    error.error === ParseErrorCode.InvalidNumberFormat ||
+    error.error >= ParseErrorCode.UnexpectedEndOfString,
+  ).sort((left, right) => left.offset - right.offset);
+  const hasTokenError = (start: number, end: number): boolean => {
+    // Token errors have non-overlapping source ranges. Binary lookup avoids
+    // a fields × errors walk on large damaged records.
+    let low = 0;
+    let high = tokenErrors.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (tokenErrors[mid].offset + tokenErrors[mid].length <= start) low = mid + 1;
+      else high = mid;
+    }
+    return low < tokenErrors.length && tokenErrors[low].offset < end;
+  };
+  const isSafePrimitive = (node: JsoncNode): boolean => {
+    if (hasTokenError(node.offset, node.offset + node.length)) return false;
+    if (node.type === "number") {
+      // The scanner splits invalid numbers such as 01 / 12abc / 1.2.3 into
+      // several tokens. Require JSON token boundaries, not just ASCII suffix
+      // checks, so Unicode and punctuation cannot leave a misleading prefix.
+      const boundary = /[ \t\r\n,\[\]{}:"]/;
+      const start = node.offset;
+      if (start > 0 && !boundary.test(raw[start - 1]) &&
+          raw.slice(Math.max(0, start - 2), start) !== "*/") return false;
+      const end = start + node.length;
+      if (end < raw.length && !boundary.test(raw[end]) &&
+          raw.slice(end, end + 2) !== "/*" && raw.slice(end, end + 2) !== "//") return false;
+    }
+    return true;
+  };
+  const pending = [root];
+  while (pending.length > 0) {
+    const node = pending.pop() as JsoncNode;
+    if (node.type === "object") {
+      const kept = (node.children ?? []).filter((property) => {
+        const key = property.children?.[0];
+        const value = property.children?.[1];
+        if (!key || !value || key.type !== "string") return false;
+        // Includes the key and key→value gap: a broken token before a value
+        // must not cause the parser to attach an unrelated later container.
+        if (hasTokenError(key.offset, value.offset)) return false;
+        if (value.type !== "object" && value.type !== "array" &&
+            !isSafePrimitive(value)) return false;
+        pending.push(value);
+        return true;
+      });
+      if (node.children) {
+        node.children.length = 0;
+        for (const child of kept) node.children.push(child);
+      }
+    } else if (node.type === "array") {
+      const kept = (node.children ?? []).filter((value) => {
+        if (value.type !== "object" && value.type !== "array" &&
+            !isSafePrimitive(value)) return false;
+        pending.push(value);
+        return true;
+      });
+      if (node.children) {
+        node.children.length = 0;
+        for (const child of kept) node.children.push(child);
+      }
+    }
+  }
+  const tree = buildJsonTree(root, raw);
+  if (isEmptyContainer(tree)) return undefined;
+  const containerRanges: TextRange[] = [];
+  const retained = [root];
+  let nodeCount = 0;
+  let primitiveCount = 0;
+  while (retained.length > 0) {
+    const node = retained.pop() as JsoncNode;
+    nodeCount += 1;
+    if (node.type === "object" || node.type === "array") {
+      containerRanges.push({ start: node.offset, end: node.offset + node.length });
+      for (const child of node.children ?? []) {
+        retained.push(node.type === "object" ? child.children![1] : child);
+      }
+    } else primitiveCount += 1;
+  }
+  // A chain of empty damaged wrappers has no confirmed data to recover.
+  if (primitiveCount === 0 && nodeCount > 1 && errors.length > 1) return undefined;
+  return {
+    tree, nodeCount, length: root.length, containerRanges,
+    recovery: {
+      errorCount: errors.length,
+      issues: errors.slice(0, 20).map((error) => ({
+        code: printParseErrorCode(error.error), offset: error.offset, length: error.length,
+      })),
+    },
+  };
 }
 
 function filterCandidatesInsideRanges(

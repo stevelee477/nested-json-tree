@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
 import test from "node:test";
+import { stringifyJsonTree } from "../jsonTree";
 import {
   InputTooLargeError,
   JsonCandidateLimitError,
@@ -158,8 +159,8 @@ test("ignores invalid outer text while finding a valid nested candidate", () => 
   assert.deepEqual(candidates.map((candidate) => candidate.value), [[1, 2]]);
 });
 
-test("does not accept structurally damaged JSON", () => {
-  assert.deepEqual(parseJsonCandidates('prefix {"a": 1 suffix'), []);
+test("strict extraction can reject structurally damaged JSON", () => {
+  assert.deepEqual(parseJsonCandidates('prefix {"a": 1 suffix', { allowPartial: false }), []);
 });
 
 test("rejects excessive unmatched nesting without scanning the full input", { timeout: 5_000 }, () => {
@@ -264,4 +265,136 @@ test("encodes a decoded string as a complete escaped JSON literal", () => {
 test("enforces the 100 MB UTF-8 size limit", () => {
   assert.doesNotThrow(() => assertInputSize("a".repeat(MAX_INPUT_BYTES)));
   assert.throws(() => assertInputSize("界".repeat(Math.floor(MAX_INPUT_BYTES / 3) + 1)), InputTooLargeError);
+});
+
+test("recovers valid fields before and after an invalid value without guessing it", () => {
+  const input = 'INFO {"before":1,"broken":undefined,"after":false} elapsed=2';
+  const [candidate] = parseJsonCandidates(input);
+  assert.deepEqual(candidate.value, { before: 1, after: false });
+  assert.ok(candidate.recovery);
+  assert.equal(candidate.raw, input.slice(candidate.start, candidate.end));
+  assert.ok(candidate.recovery.issues.some((issue) => issue.code === "InvalidSymbol"));
+  assert.equal(parseJsonCandidates(input, { allowPartial: false }).length, 0);
+});
+
+test("recovers missing separators and retains lossless tokens and duplicate keys", () => {
+  const input = '{"n":9007199254740993 "s":"\\u0061","n":2}';
+  const [candidate] = parseJsonCandidates(input);
+  assert.ok(candidate.recovery);
+  assert.deepEqual(candidate.tree.children?.map((child) => child.key), ["n", "s", "n"]);
+  assert.equal(candidate.tree.children?.[0].value.raw, "9007199254740993");
+  assert.equal(candidate.tree.children?.[1].value.raw, '"\\u0061"');
+});
+
+test("recovers truncated containers and omits incomplete properties and string tokens", () => {
+  for (const input of ['{"ok":1,"missing":', '{"ok":1,"missing":"unfinished']) {
+    const [candidate] = parseJsonCandidates(input);
+    assert.deepEqual(candidate.value, { ok: 1 });
+    assert.ok(candidate.recovery);
+    assert.equal(candidate.raw, input);
+  }
+  const [nested] = parseJsonCandidates('{"ok":1,"nested":{"flag":true}');
+  assert.deepEqual(nested.value, { ok: 1, nested: { flag: true } });
+  assert.ok(nested.recovery);
+});
+
+test("does not turn malformed primitive tokens or keys into invented values", () => {
+  for (const bad of ['01', '-01', '12abc', '1.2.3', '1e+2x', '1e', '12中文', '12@x', '12/xx', '12%', '12\u00a0x', 'truex', 'nullx', '"\\q"', '"\\u12"']) {
+    const [candidate] = parseJsonCandidates(`{"bad":${bad},"ok":2}`);
+    assert.deepEqual(candidate.value, { ok: 2 });
+    assert.ok(candidate.recovery);
+  }
+  const [candidate] = parseJsonCandidates('{"bad\\q":1,"ok":2}');
+  assert.deepEqual(candidate.value, { ok: 2 });
+  assert.deepEqual(parseJsonCandidates('{"bad":oops}'), []);
+  assert.deepEqual(parseJsonCandidates("{'bad':1}"), []);
+});
+
+test("retains useful outer fields instead of exposing only a valid inner fragment", () => {
+  const input = '{"id":7,"nested":{"ok":true},"bad":oops}';
+  const [candidate] = parseJsonCandidates(input);
+  assert.equal(candidate.raw, input);
+  assert.deepEqual(candidate.value, { id: 7, nested: { ok: true } });
+  assert.ok(candidate.recovery);
+});
+
+test("a broken key/value gap does not attach an unrelated later container", () => {
+  const candidates = parseJsonCandidates('{"id":1,"broken":oops {"next":2}}');
+  assert.deepEqual(candidates.map((candidate) => candidate.value), [{ id: 1 }, { next: 2 }]);
+  assert.ok(candidates[0].recovery);
+  assert.equal(candidates[1].recovery, undefined);
+  assert.ok(candidates[0].end <= candidates[1].start);
+});
+
+test("a truncated record does not swallow the next valid log record", () => {
+  const candidates = parseJsonCandidates('{"id":1\nINFO {"next":2}');
+  assert.deepEqual(candidates.map((candidate) => candidate.value), [{ id: 1 }, { next: 2 }]);
+  assert.ok(candidates[0].recovery);
+  assert.equal(candidates[1].recovery, undefined);
+});
+
+test("extracts adjacent and mixed complete/recovered JSON values from one line", () => {
+  const input = 'prefix {"first":1}{"bad":oops,"second":2} [3,4] tail {"last":5}';
+  const candidates = parseJsonCandidates(input);
+  assert.deepEqual(candidates.map((candidate) => candidate.value), [
+    { first: 1 }, { second: 2 }, [3, 4], { last: 5 },
+  ]);
+  assert.deepEqual(candidates.map((candidate) => Boolean(candidate.recovery)), [false, true, false, false]);
+  for (const candidate of candidates) assert.equal(candidate.raw, input.slice(candidate.start, candidate.end));
+});
+
+test("recovery does not extract damaged JSON from balanced prefix strings or comments", () => {
+  for (const prefix of ['/* {"fake":1,"bad":oops} */', '// {"fake":1,"bad":oops}\n']) {
+    assert.deepEqual(parseJsonCandidates(`${prefix}{"real":2}`).map((candidate) => candidate.value), [{ real: 2 }]);
+  }
+});
+
+test("nested decoded JSON also supports marked partial recovery", () => {
+  const [candidate] = parseNestedJsonCandidates(JSON.stringify('{"id":7,"bad":oops}'));
+  assert.deepEqual(candidate.value, { id: 7 });
+  assert.equal(candidate.unwrapDepth, 1);
+  assert.ok(candidate.recovery);
+});
+
+test("recovery diagnostics are bounded for many damaged fields", { timeout: 5_000 }, () => {
+  const input = '{"ok":true,' + Array.from({ length: 3_000 }, (_, index) => `"bad${index}":oops`).join(',') + '}';
+  const [candidate] = parseJsonCandidates(input);
+  assert.deepEqual(candidate.value, { ok: true });
+  assert.equal(candidate.nodeCount, 2);
+  assert.ok(candidate.recovery && candidate.recovery.errorCount > 3_000);
+  assert.equal(candidate.recovery.issues.length, 20);
+});
+
+test("does not reinterpret adjacent invalid numeric tokens as separate array values", () => {
+  const [candidate] = parseJsonCandidates('[01,2,1.2.3,4]');
+  assert.deepEqual(candidate.value, [2, 4]);
+  assert.ok(candidate.recovery);
+  assert.deepEqual(parseJsonCandidates('[01]'), []);
+});
+
+test("partial numeric recovery retains JSONC comments and whitespace-separated values", () => {
+  const [candidate] = parseJsonCandidates('[/* first */1/* second */,2 3,"bad":oops]');
+  assert.deepEqual(candidate.value, [1, 2, 3, "bad"]);
+  assert.ok(candidate.recovery);
+});
+
+test("damaged inputs always retain source ranges and serialize to valid JSON", () => {
+  const original = '{"id":7,"name":"hello\\nworld","items":[1,true,null,{"ok":false}],"last":3}';
+  const mutations = ["", "oops", '"', "\\q", "01", "12中文", ":", ",", "{", "]"];
+  for (let offset = 0; offset < original.length; offset += 1) {
+    const inputs = [original.slice(0, offset)];
+    for (const replacement of mutations) {
+      inputs.push(original.slice(0, offset) + replacement + original.slice(offset + 1));
+    }
+    for (const input of inputs) {
+      const candidates = parseJsonCandidates(input);
+      let previousEnd = 0;
+      for (const candidate of candidates) {
+        assert.ok(candidate.start >= previousEnd, input);
+        assert.equal(candidate.raw, input.slice(candidate.start, candidate.end), input);
+        assert.doesNotThrow(() => JSON.parse(stringifyJsonTree(candidate.tree)), input);
+        previousEnd = candidate.end;
+      }
+    }
+  }
 });

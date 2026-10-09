@@ -105,13 +105,13 @@ async function pickCandidate(
 
   const items = candidates.map((candidate, index) => ({
     label: `$(json) JSON candidate ${index + 1}`,
-    description: `characters ${candidate.start + 1}–${candidate.end}`,
+    description: `characters ${candidate.start + 1}–${candidate.end}${candidate.recovery ? " · recovered subset" : ""}`,
     detail: candidatePreview(candidate),
     candidate,
   }));
   const selected = await vscode.window.showQuickPick(items, {
     title: `Choose JSON from ${place}`,
-    placeHolder: `${candidates.length} valid JSON values found`,
+    placeHolder: `${candidates.length} JSON candidates found`,
     matchOnDetail: true,
   });
   return selected?.candidate;

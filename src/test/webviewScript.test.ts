@@ -8,6 +8,8 @@ import {
   jsonTreePrimitiveSearchText,
 } from "../search";
 
+import { createWebviewHarness } from "./webviewHarness";
+
 const sourcePath = path.resolve(__dirname, "../../src/treePanel.ts");
 const source = readFileSync(sourcePath, "utf8");
 
@@ -140,133 +142,7 @@ test("bulk tree operations are iterative, chunked, and size-limited", () => {
 });
 
 test("oversized roots stay collapsed and manual expansion materializes cancellable chunks", () => {
-  class FakeClassList {
-    private readonly names = new Set<string>();
-
-    add(...names: string[]): void {
-      for (const name of names) this.names.add(name);
-    }
-
-    remove(...names: string[]): void {
-      for (const name of names) this.names.delete(name);
-    }
-
-    toggle(name: string, force?: boolean): boolean {
-      const enabled = force ?? !this.names.has(name);
-      if (enabled) this.names.add(name);
-      else this.names.delete(name);
-      return enabled;
-    }
-  }
-
-  class FakeElement {
-    readonly classList = new FakeClassList();
-    readonly listeners = new Map<string, Array<(event: unknown) => void>>();
-    readonly attributes = new Map<string, string>();
-    readonly children: FakeElement[] = [];
-    className = "";
-    textContent = "";
-    title = "";
-    value = "";
-    disabled = false;
-
-    constructor(readonly fragment = false) {}
-
-    addEventListener(type: string, listener: (event: unknown) => void): void {
-      const listeners = this.listeners.get(type) ?? [];
-      listeners.push(listener);
-      this.listeners.set(type, listeners);
-    }
-
-    dispatch(type: string): void {
-      for (const listener of this.listeners.get(type) ?? []) listener({});
-    }
-
-    appendChild(child: FakeElement): FakeElement {
-      if (child.fragment) this.children.push(...child.children);
-      else this.children.push(child);
-      return child;
-    }
-
-    replaceChildren(...children: FakeElement[]): void {
-      this.children.splice(0, this.children.length, ...children);
-    }
-
-    setAttribute(name: string, value: string): void {
-      this.attributes.set(name, value);
-    }
-
-    querySelectorAll(): FakeElement[] {
-      return [];
-    }
-
-    getBoundingClientRect(): { width: number; height: number } {
-      return { width: 0, height: 0 };
-    }
-
-    focus(): void {}
-    select(): void {}
-    scrollIntoView(): void {}
-  }
-
-  const elementIds = [
-    "tree",
-    "menu",
-    "search-input",
-    "search-count",
-    "search-scope-warning",
-    "previous-match",
-    "next-match",
-    "clear-search",
-    "expand-all",
-    "collapse-all",
-    "empty-search",
-    "title",
-    "path",
-    "jsonl-bar",
-    "previous-jsonl",
-    "next-jsonl",
-    "jsonl-line",
-    "jsonl-total",
-    "go-jsonl",
-    "reveal-source",
-    "follow-cursor",
-    "jsonl-status",
-  ];
-  const elements = new Map(elementIds.map((id) => [id, new FakeElement()]));
-  const windowListeners = new Map<string, Array<(event: { data: unknown }) => void>>();
-  const timers: Array<() => void> = [];
-  const document = {
-    getElementById: (id: string) => elements.get(id),
-    createElement: () => new FakeElement(),
-    createDocumentFragment: () => new FakeElement(true),
-    addEventListener: () => {},
-  };
-  const window = {
-    innerWidth: 1_000,
-    innerHeight: 800,
-    addEventListener: (type: string, listener: (event: { data: unknown }) => void) => {
-      const listeners = windowListeners.get(type) ?? [];
-      listeners.push(listener);
-      windowListeners.set(type, listeners);
-    },
-  };
-  const setTimeout = (callback: () => void): number => {
-    timers.push(callback);
-    return timers.length;
-  };
-
-  const run = new Function(
-    "window",
-    "document",
-    "acquireVsCodeApi",
-    "setTimeout",
-    "clearTimeout",
-    "performance",
-    embeddedWebviewScript(),
-  );
-  run(window, document, () => ({ postMessage: () => {} }), setTimeout, () => {}, { now: () => 0 });
-
+  const { elements, windowListeners, timers } = createWebviewHarness(embeddedWebviewScript());
   const children = Array.from({ length: 20_000 }, (_, index) => ({
     key: index,
     value: { id: index + 1, type: "number", raw: "0" },
@@ -308,4 +184,108 @@ test("oversized roots stay collapsed and manual expansion materializes cancellab
   assert.ok(cancelledChunk);
   cancelledChunk();
   assert.equal(root.children[1].children.length, 200, "collapsing must cancel pending materialization");
+});
+
+
+function renderTree(harness: ReturnType<typeof createWebviewHarness>, root: unknown, options: Record<string, unknown> = {}): void {
+  const onMessage = harness.windowListeners.get("message")?.[0];
+  assert.ok(onMessage);
+  onMessage({ data: {
+    type: "render", root, title: "test", pathLabel: "$", autoExpand: false,
+    canExpandAll: true, expandAllLimit: 10_000, ...options,
+  } });
+}
+
+function arrayOfSmallObjects(count: number) {
+  let id = 0;
+  const root = { id: id++, type: "array", children: [] as unknown[] };
+  for (let index = 0; index < count; index += 1) {
+    root.children.push({ key: index, value: {
+      id: id++, type: "object", children: [
+        { key: "value", value: { id: id++, type: "number", raw: String(index) } },
+      ],
+    } });
+  }
+  return root;
+}
+
+test("bulk expansion shares timer turns across many small objects and still yields", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  renderTree(harness, arrayOfSmallObjects(2_000), { autoExpand: true });
+  assert.ok(harness.timers.length > 0, "wide arrays should yield DOM work");
+  const turns = harness.drainTimers();
+  assert.ok(turns < 60, `expected shared slices, not one timer per object; got ${turns}`);
+  const root = harness.elements.get("tree")!.children[0];
+  assert.equal(root.children[1].children.length, 2_000);
+  for (const object of root.children[1].children) {
+    assert.equal(object.attributes.get("aria-expanded"), "true");
+    assert.equal(object.children[1].children.length, 1);
+  }
+  assert.equal(harness.elements.get("expand-all")!.disabled, false);
+  assert.equal(harness.elements.get("tree-operation-status")!.textContent, "");
+});
+
+test("collapse cancels bulk expansion and a later expand does not duplicate nodes", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  renderTree(harness, arrayOfSmallObjects(1_000), { autoExpand: true });
+  harness.timers.shift()!();
+  harness.elements.get("collapse-all")!.dispatch("click");
+  harness.drainTimers();
+  const root = harness.elements.get("tree")!.children[0];
+  assert.equal(root.attributes.get("aria-expanded"), "false");
+  assert.ok(root.children[1].children.length < 1_000);
+  harness.elements.get("expand-all")!.dispatch("click");
+  harness.drainTimers();
+  assert.equal(root.children[1].children.length, 1_000);
+  const nodeIds = root.children[1].children.map((node) => node.attributes.get("aria-expanded"));
+  assert.ok(nodeIds.every((state) => state === "true"));
+});
+
+test("search can interrupt expansion without leaving controls busy", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  renderTree(harness, arrayOfSmallObjects(1_000), { autoExpand: true });
+  assert.equal(harness.elements.get("search-input")!.disabled, false);
+  harness.elements.get("search-input")!.value = "999";
+  harness.elements.get("search-input")!.dispatch("input");
+  harness.drainTimers();
+  assert.match(harness.elements.get("search-count")!.textContent, /1/);
+  harness.elements.get("clear-search")!.dispatch("click");
+  harness.drainTimers();
+  assert.equal(harness.elements.get("expand-all")!.disabled, false);
+});
+
+test("replacing a searched JSONL record reruns the query instead of hiding the tree", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  renderTree(harness, { id: 0, type: "string", raw: '"first foo"', value: "first foo" });
+  harness.drainTimers();
+  harness.elements.get("search-input")!.value = "foo";
+  harness.elements.get("search-input")!.dispatch("input");
+  harness.drainTimers();
+  renderTree(harness, { id: 0, type: "string", raw: '"second foo"', value: "second foo" });
+  harness.drainTimers();
+  const root = harness.elements.get("tree")!.children[0];
+  assert.equal(root.classList.contains("search-hidden"), false);
+  assert.equal(harness.elements.get("search-input")!.value, "foo");
+  assert.match(harness.elements.get("search-count")!.textContent, /1/);
+  renderTree(harness, { id: 0, type: "string", raw: '"no match"', value: "no match" });
+  harness.drainTimers();
+  assert.equal(harness.elements.get("tree")!.children[0].classList.contains("search-hidden"), true);
+  assert.match(harness.elements.get("search-count")!.textContent, /0/);
+});
+
+test("partial recovery warning resets when navigating back to a complete value", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  const root = { id: 0, type: "number", raw: "1" };
+  renderTree(harness, root, { recovery: {
+    errorCount: 1, issues: [{ code: "CloseBraceExpected", offset: 8, length: 0 }],
+  } });
+  harness.drainTimers();
+  const warning = harness.elements.get("recovery-warning")!;
+  assert.equal(warning.classList.contains("hidden"), false);
+  assert.match(warning.textContent, /recovered subset/);
+  assert.match(warning.title, /character 9/);
+  renderTree(harness, root);
+  harness.drainTimers();
+  assert.equal(warning.classList.contains("hidden"), true);
+  assert.equal(warning.textContent, "");
 });

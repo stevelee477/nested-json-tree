@@ -134,6 +134,7 @@ export class JsonTreePanel {
       title: this.title,
       pathLabel: this.pathLabel,
       truncatedFieldCount: this.webviewModel.truncatedFieldCount,
+      recovery: this.candidate.recovery,
       autoExpand: shouldAutoExpandTree(this.candidate.tree, maxNodes),
       canExpandAll: isTreeNodeCountWithinLimit(this.candidate.tree, MAX_EXPAND_ALL_NODES),
       expandAllLimit: MAX_EXPAND_ALL_NODES,
@@ -323,6 +324,11 @@ export class JsonTreePanel {
         preview: false,
         viewColumn: vscode.ViewColumn.Beside,
       });
+      if (selected.recovery) {
+        void vscode.window.showWarningMessage(
+          "Opened a recovered JSON subset. Damaged or missing values were omitted; array indices refer to the recovered subset, not the original source.",
+        );
+      }
       if (serialized.compacted) {
         void vscode.window.showInformationMessage(
           "Opened compact JSON because pretty-formatted output would be too large.",
@@ -536,6 +542,8 @@ export class JsonTreePanel {
     .header-main { width: 100%; display: flex; align-items: center; gap: 8px; min-height: 24px; }
     .header-title { min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .header-path { color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family); }
+    .recovery-warning { color: var(--vscode-editorWarning-foreground); font-size: 0.9em; }
+    #tree-operation-status { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
     .header-actions { display: flex; gap: 4px; margin-left: auto; }
     .header-button {
       flex: 0 0 auto;
@@ -656,11 +664,13 @@ export class JsonTreePanel {
     <div class="header-main">
       <span class="header-title" id="title"></span>
       <span class="header-path" id="path"></span>
+      <span id="tree-operation-status" aria-live="polite"></span>
       <span class="header-actions">
         <button class="header-button" id="expand-all" type="button" title="Expand every object and array">Expand all</button>
         <button class="header-button" id="collapse-all" type="button" title="Collapse the entire tree">Collapse all</button>
       </span>
     </div>
+    <div class="recovery-warning hidden" id="recovery-warning" role="status"></div>
     <div class="jsonl-bar hidden" id="jsonl-bar" aria-label="JSONL navigation">
       <button class="header-button" id="previous-jsonl" type="button" title="Previous valid JSON line">← Prev</button>
       <button class="header-button" id="next-jsonl" type="button" title="Next valid JSON line">Next →</button>
@@ -698,6 +708,8 @@ export class JsonTreePanel {
     const expandAllButton = document.getElementById('expand-all');
     const collapseAllButton = document.getElementById('collapse-all');
     const emptySearch = document.getElementById('empty-search');
+    const recoveryWarning = document.getElementById('recovery-warning');
+    const treeOperationStatus = document.getElementById('tree-operation-status');
     const jsonlBar = document.getElementById('jsonl-bar');
     const previousJsonlButton = document.getElementById('previous-jsonl');
     const nextJsonlButton = document.getElementById('next-jsonl');
@@ -718,6 +730,7 @@ export class JsonTreePanel {
     let activeTreeOperation = 0;
     let treeOperationRunning = false;
     const MATERIALIZE_CHILD_CHUNK_SIZE = 200;
+    const TREE_OPERATION_CHUNK_SIZE = 200;
 
     window.addEventListener('message', (event) => {
       const message = event.data;
@@ -729,6 +742,22 @@ export class JsonTreePanel {
       activeTreeOperation += 1;
       latestSearchRequest += 1;
       treeOperationRunning = false;
+      clearTimeout(searchTimer);
+      searchActive = false;
+      matchRows = [];
+      activeMatchIndex = -1;
+      searchCount.textContent = '';
+      previousMatchButton.disabled = true;
+      nextMatchButton.disabled = true;
+      emptySearch.classList.add('hidden');
+      treeOperationStatus.textContent = '';
+      recoveryWarning.classList.toggle('hidden', !message.recovery);
+      recoveryWarning.textContent = message.recovery
+        ? 'Recovered partial JSON · ' + message.recovery.errorCount + ' syntax issue(s). Damaged values omitted; copy/open uses the recovered subset (array indices may differ).'
+        : '';
+      recoveryWarning.title = message.recovery
+        ? message.recovery.issues.map((issue) => issue.code + ' at character ' + (issue.offset + 1)).join('; ')
+        : '';
       currentRoot = message.root;
       expandAllAllowed = message.canExpandAll;
       document.getElementById('title').textContent = message.title;
@@ -745,7 +774,9 @@ export class JsonTreePanel {
         : 'Expand all is unavailable because this tree exceeds ' + message.expandAllLimit.toLocaleString() + ' nodes';
       rootNode = createNode('$', currentRoot, undefined);
       tree.replaceChildren(rootNode);
-      if (message.autoExpand && expandAllAllowed) {
+      if (searchInput.value.trim()) {
+        runSearch();
+      } else if (message.autoExpand && expandAllAllowed) {
         runTreeOperation(true);
       } else if (expandAllAllowed) {
         runRootExpansion();
@@ -958,29 +989,34 @@ export class JsonTreePanel {
       const processChunk = () => {
         if (!isCurrent()) return;
         const startedAt = performance.now();
-        while (index < pending.length && performance.now() - startedAt < 8) {
+        let processedInChunk = 0;
+        while (index < pending.length && processedInChunk < TREE_OPERATION_CHUNK_SIZE && performance.now() - startedAt < 8) {
           const node = pending[index];
           const finishCurrentNode = () => {
             for (const childNode of node.getRenderedChildren()) pending.push(childNode);
             index += 1;
+            processedInChunk += 1;
           };
           if (
             shouldExpand &&
             !node.ensureExpanded(isCurrent, () => {
               if (!isCurrent()) return;
               finishCurrentNode();
+              treeOperationStatus.textContent = 'Expanding… ' + index.toLocaleString() + ' nodes · Collapse all to stop';
               setTimeout(processChunk, 0);
-            })
+            }, true)
           ) {
             return;
           }
           if (!shouldExpand) node.setExpanded(false);
           finishCurrentNode();
         }
+        treeOperationStatus.textContent = (shouldExpand ? 'Expanding… ' : 'Collapsing… ') + index.toLocaleString() + ' nodes';
         if (index < pending.length) {
           setTimeout(processChunk, 0);
         } else {
           treeOperationRunning = false;
+          treeOperationStatus.textContent = '';
           updateActionButtons();
         }
       };
@@ -1019,7 +1055,8 @@ export class JsonTreePanel {
       expandAllButton.disabled = searchActive || treeOperationRunning || !expandAllAllowed;
       // Collapse all also acts as a user-visible cancellation for an in-flight expansion.
       collapseAllButton.disabled = searchActive;
-      searchInput.disabled = treeOperationRunning;
+      searchInput.disabled = false;
+      if (!treeOperationRunning) treeOperationStatus.textContent = "";
     }
 
     function applyJsonlState(state) {
@@ -1103,7 +1140,7 @@ export class JsonTreePanel {
         toggle.textContent = shouldExpand ? '▾' : '▸';
         node.setAttribute('aria-expanded', String(shouldExpand));
       };
-      const ensureExpanded = (isCurrent, onComplete) => {
+      const ensureExpanded = (isCurrent, onComplete, eager = false) => {
         if (!expandable) return true;
         setExpanded(true);
         if (fullyMaterialized) return true;
@@ -1118,7 +1155,7 @@ export class JsonTreePanel {
           node.appendChild(children);
         }
         const generation = ++materializeGeneration;
-        const processMaterializeChunk = () => {
+        const processMaterializeChunk = (notify = true) => {
           if (generation !== materializeGeneration || !isCurrent() || !isExpanded) return;
           const fragment = document.createDocumentFragment();
           const startedAt = performance.now();
@@ -1148,11 +1185,16 @@ export class JsonTreePanel {
             setTimeout(processMaterializeChunk, 0);
           } else {
             fullyMaterialized = true;
-            onComplete();
+            if (notify) onComplete();
           }
         };
-        setTimeout(processMaterializeChunk, 0);
-        return false;
+        // Bulk operations share their traversal time slice instead of paying
+        // one timer turn for every tiny object. Wide/manual expansion still
+        // yields in bounded chunks, and synchronous completion never invokes
+        // the asynchronous continuation twice.
+        if (eager) processMaterializeChunk(false);
+        else setTimeout(processMaterializeChunk, 0);
+        return fullyMaterialized;
       };
       node.nodeId = model.id;
       node.setExpanded = setExpanded;

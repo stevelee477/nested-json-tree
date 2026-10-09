@@ -33,6 +33,14 @@ Nested JSON Tree is a read-only viewer for the JSON that ordinary formatters str
 - Choose between multiple detected JSON candidates.
 - Automatically expand small trees; keep large trees manageable.
 
+## Partial JSON recovery and expansion
+
+Damaged input such as `{"id":7,"broken":undefined,"ok":true}` can retain the confirmed `id` and `ok` fields. Missing commas or closing delimiters are handled on a best-effort basis. Incomplete strings, malformed numbers such as `01` / `1e`, and invalid escapes are omitted rather than guessed; single-quoted or unquoted keys are not converted into JSON. Multiple JSON values on one line are listed separately, including mixtures of complete and recoverable values.
+
+Recovered trees display **Recovered partial JSON**; the picker labels them **recovered subset**. The warning tooltip includes bounded diagnostics with character positions relative to the candidate source. Copy/open produces the recovered subset, **not the complete original JSON**. Damaged array elements are omitted, so recovered array indices may differ from the source. The original file is never modified.
+
+**Expand all** shares bounded time/node slices across small containers instead of waiting one timer turn per object. **Collapse all** cancels expansion, and search can interrupt it. The 10,000-node bulk-expansion safety limit remains; larger trees can still be expanded manually in chunks.
+
 ## Nested JSON
 
 Right-click any string node to open JSON encoded inside it. The new tree supports the same actions, so nesting can be explored repeatedly.
@@ -101,7 +109,7 @@ Example jq path:
 - JSONC comments and trailing commas are accepted; opening parsed JSON in an editor produces strict JSON.
 - Number and string tokens, key escapes, key order, and duplicate keys are preserved.
 - Empty `{}` and `[]` extraction candidates are ignored.
-- Structurally broken JSON, such as missing quotes or braces, is not repaired.
+- Complete parsing takes priority; damaged input may expose a clearly marked confirmed subset. Recovery is best-effort, may omit fields or candidates, and never repairs or overwrites the original source.
 - Pretty output that would exceed 16 Mi characters falls back to compact JSON; clipboard/editor output above 50 Mi characters is rejected.
 - Long key/value tokens and displayed UI paths are shortened to at most 10,000 characters. Search covers the shortened Tree View fields; copy and nested-open actions still use complete Host-side data.
 - The tree is read-only; parsed JSON can be opened in a separate editor for editing.

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0
+
+- Added explicitly marked partial recovery for missing separators, truncated containers, and damaged values while retaining confirmed lossless tokens and omitting malformed primitives.
+- Kept complete and recoverable JSON candidates separate in mixed log lines, without letting a broken outer record swallow later complete values.
+- Shared bounded bulk-expansion slices across small containers, added progress feedback, and allowed search or Collapse all to cancel expansion.
+- Reapplied search when replacing JSONL records instead of leaving the new tree hidden by stale search state.
+- Added parser, JSONL, executable Webview, and Extension Host regression coverage.
+
 ## 0.5.0
 
 - Opened nested JSON Tree Views as new tabs in the current editor group instead of splitting them to the side.

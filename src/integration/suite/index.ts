@@ -24,6 +24,7 @@ export async function run(): Promise<void> {
 
   await verifyOpenDocumentCommand();
   await verifyOpenCurrentLineCommand();
+  await verifyRecoveredDocumentCommand();
 }
 
 async function verifyOpenDocumentCommand(): Promise<void> {
@@ -103,4 +104,17 @@ async function waitForViewerTab(
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function verifyRecoveredDocumentCommand(): Promise<void> {
+  const document = await vscode.workspace.openTextDocument({
+    language: "json",
+    content: '{"source":"partial","bad":oops,"nested":{"ok":true}',
+  });
+  await vscode.window.showTextDocument(document, { preview: false });
+  const expectedLabel = "JSON Tree · Untitled";
+  const existingCount = viewerTabs().filter((tab) => tab.label === expectedLabel).length;
+  await vscode.commands.executeCommand(OPEN_DOCUMENT_COMMAND);
+  const tab = await waitForViewerTab((candidate) => candidate.label === expectedLabel, existingCount);
+  assert.equal(isViewerViewType(tab.input.viewType), true);
 }
