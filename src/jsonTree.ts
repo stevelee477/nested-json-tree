@@ -161,19 +161,6 @@ export function buildJsonTree(root: JsoncNode, source: string): JsonTreeNode {
   return result;
 }
 
-/** Finds the node selected by a Webview message without trusting its value. */
-export function findJsonTreeNode(root: JsonTreeNode, id: number): JsonTreeNode | undefined {
-  const pending = [root];
-  while (pending.length > 0) {
-    const current = pending.pop() as JsonTreeNode;
-    if (current.id === id) return current;
-    const children = current.children ?? [];
-    for (let index = children.length - 1; index >= 0; index -= 1) {
-      pending.push(children[index].value);
-    }
-  }
-  return undefined;
-}
 
 /** Accepts only IDs that can be used safely as keys in the host-owned node index. */
 export function isValidJsonTreeNodeId(value: unknown): value is number {
@@ -181,49 +168,93 @@ export function isValidJsonTreeNodeId(value: unknown): value is number {
 }
 
 /**
- * Builds an O(1) node lookup plus parent links for deriving trusted paths.
- * Duplicate object keys make that segment, and every descendant, ambiguous.
+ * O(1) node lookup plus parent links for deriving trusted paths. Links live in
+ * typed arrays; context objects are materialized only for a requested node, so
+ * large trees do not pay for one context object per node.
  */
-export function buildJsonTreeContextIndex(
-  root: JsonTreeNode,
-): Map<number, JsonTreeNodeContext> {
-  const rootContext: JsonTreeNodeContext = { node: root, hasDuplicateKeyInPath: false };
-  const contexts = new Map<number, JsonTreeNodeContext>([[root.id, rootContext]]);
-  const pending = [rootContext];
+export class JsonTreeIndex {
+  private readonly nodes: Array<JsonTreeNode | undefined>;
+  private readonly parents: Int32Array;
+  private readonly childIndexes: Int32Array;
+  private readonly duplicateKeyInPath: Uint8Array;
 
-  while (pending.length > 0) {
-    const parent = pending.pop() as JsonTreeNodeContext;
-    const children = parent.node.children ?? [];
-    const duplicateKeys = new Set<string>();
-    if (parent.node.type === "object") {
-      const seenKeys = new Set<string>();
-      for (const child of children) {
-        const key = child.key as string;
-        if (seenKeys.has(key)) duplicateKeys.add(key);
-        else seenKeys.add(key);
-      }
+  constructor(root: JsonTreeNode) {
+    let maxId = root.id;
+    const scan = [root];
+    while (scan.length > 0) {
+      const current = scan.pop() as JsonTreeNode;
+      if (!isValidJsonTreeNodeId(current.id)) throw new Error(`Invalid JSON tree node ID ${current.id}.`);
+      if (current.id > maxId) maxId = current.id;
+      for (const child of current.children ?? []) scan.push(child.value);
     }
 
-    for (let index = children.length - 1; index >= 0; index -= 1) {
-      const child = children[index];
-      const context: JsonTreeNodeContext = {
-        node: child.value,
-        parent,
-        key: child.key,
-        rawKey: child.rawKey,
-        hasDuplicateKeyInPath:
-          parent.hasDuplicateKeyInPath ||
-          (parent.node.type === "object" && duplicateKeys.has(child.key as string)),
-      };
-      if (contexts.has(child.value.id)) {
-        throw new Error(`Duplicate JSON tree node ID ${child.value.id}.`);
+    this.nodes = new Array(maxId + 1);
+    this.parents = new Int32Array(maxId + 1).fill(-1);
+    this.childIndexes = new Int32Array(maxId + 1).fill(-1);
+    this.duplicateKeyInPath = new Uint8Array(maxId + 1);
+    this.nodes[root.id] = root;
+
+    const pending = [root];
+    while (pending.length > 0) {
+      const parent = pending.pop() as JsonTreeNode;
+      const children = parent.children ?? [];
+      // Duplicate object keys make that segment, and every descendant, ambiguous.
+      const duplicateKeys = new Set<string>();
+      if (parent.type === "object") {
+        const seenKeys = new Set<string>();
+        for (const child of children) {
+          const key = child.key as string;
+          if (seenKeys.has(key)) duplicateKeys.add(key);
+          else seenKeys.add(key);
+        }
       }
-      contexts.set(child.value.id, context);
-      pending.push(context);
+      for (let index = 0; index < children.length; index += 1) {
+        const child = children[index];
+        const id = child.value.id;
+        if (this.nodes[id] !== undefined) throw new Error(`Duplicate JSON tree node ID ${id}.`);
+        this.nodes[id] = child.value;
+        this.parents[id] = parent.id;
+        this.childIndexes[id] = index;
+        this.duplicateKeyInPath[id] =
+          this.duplicateKeyInPath[parent.id] === 1 ||
+          (parent.type === "object" && duplicateKeys.has(child.key as string))
+            ? 1
+            : 0;
+        pending.push(child.value);
+      }
     }
   }
 
-  return contexts;
+  get(id: number): JsonTreeNodeContext | undefined {
+    if (!isValidJsonTreeNodeId(id) || id >= this.nodes.length || this.nodes[id] === undefined) {
+      return undefined;
+    }
+    const chain: number[] = [];
+    for (let current = id; current >= 0; current = this.parents[current]) chain.push(current);
+
+    let context: JsonTreeNodeContext | undefined;
+    for (let index = chain.length - 1; index >= 0; index -= 1) {
+      const nodeId = chain[index];
+      const node = this.nodes[nodeId] as JsonTreeNode;
+      if (context === undefined) {
+        context = { node, hasDuplicateKeyInPath: false };
+        continue;
+      }
+      const edge = (context.node.children as JsonTreeChild[])[this.childIndexes[nodeId]];
+      context = {
+        node,
+        parent: context,
+        key: edge.key,
+        rawKey: edge.rawKey,
+        hasDuplicateKeyInPath: this.duplicateKeyInPath[nodeId] === 1,
+      };
+    }
+    return context;
+  }
+}
+
+export function buildJsonTreeContextIndex(root: JsonTreeNode): JsonTreeIndex {
+  return new JsonTreeIndex(root);
 }
 
 /** Restores a decoded path from host-owned parent links in O(depth). */
@@ -331,18 +362,6 @@ export function createJsonTreeWebviewModel(
   return { root: targetRoot, truncatedFieldCount };
 }
 
-/** Counts nodes with an optional early-exit ceiling. */
-export function countJsonTreeNodes(root: JsonTreeNode, stopAfter = Number.POSITIVE_INFINITY): number {
-  const pending = [root];
-  let count = 0;
-  while (pending.length > 0) {
-    const current = pending.pop() as JsonTreeNode;
-    count += 1;
-    if (count > stopAfter) return count;
-    for (const child of current.children ?? []) pending.push(child.value);
-  }
-  return count;
-}
 
 /** Recreates the conventional (potentially number-lossy) compatibility value iteratively. */
 export function jsonTreeToValue(root: JsonTreeNode): JsonValue {

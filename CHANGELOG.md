@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Raised the default value-node limit from 100,000 to 500,000 and made it configurable with `nestedJsonTree.maxValueNodes`; ordinary multi-megabyte record arrays now open.
+- Stopped counting unmatched brackets in surrounding log text as nesting, so logs with many truncated records no longer fail with a misleading "nesting too deep" error. Deep complete values are still rejected.
+- Recovered every record in a run of truncated log records instead of only the first, and removed quadratic work from partial recovery.
+- Cleared the JSONL busy state and reported an error when navigation fails, for example after the source file is deleted; unexpected command and Tree View errors are now shown instead of being silently dropped.
+- Follow cursor no longer opens a picker on lines with several JSON values; it shows the first one and notes how many there are.
+- Allowed expanding/collapsing branches and **Collapse all** while search results are shown.
+- Added keyboard navigation (arrow keys, Home/End, Enter/Space, Shift+F10) and an accessible actions menu to the Tree View.
+- Restored expansion, search, and scroll state for hidden tabs instead of keeping every Webview alive in memory.
+- Reduced Extension Host memory with a compact node index, no duplicate plain-value copy per candidate, and no retained Webview model.
+- Moved the Webview script and styles into a separately bundled, type-checked module loaded under a nonce-only CSP with a cryptographic nonce.
+
 ## 0.6.0
 
 - Added explicitly marked partial recovery for missing separators, truncated containers, and damaged values while retaining confirmed lossless tokens and omitting malformed primitives.

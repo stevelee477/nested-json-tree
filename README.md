@@ -70,7 +70,7 @@ Editor context-menu entries appear only for JSON/JSONC and JSONL/NDJSON files. B
 Or install from the command line:
 
 ```sh
-code --install-extension nested-json-tree-0.5.0.vsix
+code --install-extension nested-json-tree-<version>.vsix
 ```
 
 ## Commands
@@ -86,7 +86,10 @@ code --install-extension nested-json-tree-0.5.0.vsix
 - `Cmd+F` / `Ctrl+F` focuses tree search.
 - `Enter` and `Shift+Enter` move through search results.
 - `Esc` clears search and restores the previous expansion state.
-- Right-click a node to copy its value, key, JSONPath, or jq path.
+- While search results are shown, branches can still be expanded or collapsed, and **Collapse all** stays available.
+- Right-click a node (or press `Shift+F10`) to copy its value, key, JSONPath, or jq path.
+- Keyboard: `↑`/`↓` move between rows, `→`/`←` expand/collapse or move to the child/parent, `Home`/`End` jump to the first/last row, `Enter`/`Space` toggle a container or open the actions menu.
+- Expansion, search text, and scroll position are restored when you return to a hidden Tree View tab.
 - String-node actions can open parsed JSON or open the decoded value unchanged as plain text.
 
 Example jq path:
@@ -100,11 +103,12 @@ Example jq path:
 | Setting | Default | Description |
 | --- | ---: | --- |
 | `nestedJsonTree.autoExpandMaxNodes` | `200` | Fully expand trees at or below this node count. Set to `0` to disable automatic descendant expansion; roots above the 10,000-node materialization limit remain collapsed. |
+| `nestedJsonTree.maxValueNodes` | `500000` | Maximum JSON value nodes parsed for one document or tree (10,000–5,000,000). Each million nodes uses roughly 250 MB of Extension Host memory. |
 
 ## Parsing boundaries
 
 - Maximum input size: 100 MB.
-- Safety limits: 1,024 nesting levels, 100,000 value nodes in total, 5,000 extracted candidates, and 50,000 potential container spans.
+- Safety limits: 1,024 nesting levels, 500,000 value nodes in total (configurable), 5,000 extracted candidates, and 50,000 potential container spans. Unmatched brackets in surrounding log text do not count as nesting.
 - Common log prefixes and suffixes are supported. Extraction from ambiguous combinations of unmatched quotes/comments is best-effort.
 - JSONC comments and trailing commas are accepted; opening parsed JSON in an editor produces strict JSON.
 - Number and string tokens, key escapes, key order, and duplicate keys are preserved.
@@ -123,7 +127,7 @@ npm run test:integration
 npm run package
 ```
 
-Press `F5` in VS Code to launch an Extension Development Host. Synthetic screenshot data lives in [`examples/`](examples/).
+`npm run watch` rebuilds the extension and Webview bundles on change. Press `F5` in VS Code to launch an Extension Development Host. Synthetic screenshot data lives in [`examples/`](examples/).
 
 ## Contributing
 

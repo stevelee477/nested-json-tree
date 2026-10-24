@@ -1,20 +1,31 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import {
-  InputTooLargeError,
   JsonCandidate,
   JsonProcessingLimitError,
   assertInputSize,
   candidatePreview,
   parseJsonCandidates,
 } from "./parser";
-import { JsonTreePanel } from "./treePanel";
+import { describeLimitError, getParseOptions, reportUnexpectedError } from "./settings";
+import { JsonTreePanel, JsonlSourceContext, PanelServices, getReadyWebviewCount } from "./treePanel";
 
-export function activate(context: vscode.ExtensionContext): void {
+let services: PanelServices;
+
+/** Returned from activate() for integration tests; not a supported public API. */
+export interface ExtensionTestApi {
+  readyWebviewCount(): number;
+}
+
+export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
+  services = { extensionUri: context.extensionUri, pickCandidate };
   context.subscriptions.push(
-    vscode.commands.registerCommand("nestedJsonTree.openDocument", () => void openDocument()),
-    vscode.commands.registerCommand("nestedJsonTree.openCurrentLine", () => void openCurrentLine()),
+    vscode.commands.registerCommand("nestedJsonTree.openDocument", () =>
+      openDocument().catch((error: unknown) => reportUnexpectedError("Open Document as Tree", error))),
+    vscode.commands.registerCommand("nestedJsonTree.openCurrentLine", () =>
+      openCurrentLine().catch((error: unknown) => reportUnexpectedError("Open Current Line as Tree", error))),
   );
+  return { readyWebviewCount: getReadyWebviewCount };
 }
 
 export function deactivate(): void {}
@@ -61,24 +72,26 @@ async function parseAndOpen(
   text: string,
   title: string,
   place: string,
-  jsonlSource?: Parameters<typeof JsonTreePanel.create>[5],
+  jsonlSource?: JsonlSourceContext,
 ): Promise<void> {
+  let candidates: JsonCandidate[];
   try {
-    await openCandidates(parseJsonCandidates(text), title, place, jsonlSource);
+    candidates = parseJsonCandidates(text, getParseOptions());
   } catch (error) {
     if (error instanceof JsonProcessingLimitError) {
-      void vscode.window.showErrorMessage(error.message);
+      void vscode.window.showErrorMessage(describeLimitError(error));
       return;
     }
     throw error;
   }
+  await openCandidates(candidates, title, place, jsonlSource);
 }
 
 async function openCandidates(
   candidates: JsonCandidate[],
   title: string,
   place: string,
-  jsonlSource?: Parameters<typeof JsonTreePanel.create>[5],
+  jsonlSource?: JsonlSourceContext,
 ): Promise<void> {
   if (candidates.length === 0) {
     void vscode.window.showErrorMessage(`No valid JSON object, array, or value was found in the ${place}.`);
@@ -86,14 +99,13 @@ async function openCandidates(
   }
   const selected = await pickCandidate(candidates, place);
   if (selected !== undefined) {
-    JsonTreePanel.create(
-      selected,
+    JsonTreePanel.create(services, {
+      candidate: selected,
       title,
-      pickCandidate,
-      jsonlSource === undefined ? "$" : `$ · line ${jsonlSource.lineNumber + 1}`,
-      vscode.ViewColumn.Beside,
+      pathLabel: jsonlSource === undefined ? "$" : `$ · line ${jsonlSource.lineNumber + 1}`,
+      viewColumn: vscode.ViewColumn.Beside,
       jsonlSource,
-    );
+    });
   }
 }
 
@@ -122,8 +134,8 @@ function checkSize(text: string): boolean {
     assertInputSize(text);
     return true;
   } catch (error) {
-    const message = error instanceof InputTooLargeError ? error.message : String(error);
-    void vscode.window.showErrorMessage(message);
+    if (!(error instanceof JsonProcessingLimitError)) throw error;
+    void vscode.window.showErrorMessage(error.message);
     return false;
   }
 }

@@ -2,52 +2,48 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import {
-  advanceJsonTreeSearch,
-  createJsonTreeSearchState,
-  jsonTreePrimitiveSearchText,
-} from "../search";
 
 import { createWebviewHarness } from "./webviewHarness";
 
-const sourcePath = path.resolve(__dirname, "../../src/treePanel.ts");
-const source = readFileSync(sourcePath, "utf8");
+const root = path.resolve(__dirname, "../..");
+const hostSource = readFileSync(path.join(root, "src/treePanel.ts"), "utf8");
+const webviewSource = readFileSync(path.join(root, "src/webview/main.ts"), "utf8");
 
+/** The bundled script that the panel actually loads. */
 function embeddedWebviewScript(): string {
-  const match = source.match(/<script nonce="\$\{nonce\}">([\s\S]*?)<\/script>/);
-  assert.ok(match, "embedded webview script must be present");
-  const runtime = [
-    `const createJsonTreeSearchState = ${createJsonTreeSearchState.toString()};`,
-    `const jsonTreePrimitiveSearchText = ${jsonTreePrimitiveSearchText.toString()};`,
-    `const advanceJsonTreeSearch = ${advanceJsonTreeSearch.toString()};`,
-  ].join("\n");
-  return match[1].replace("${searchRuntime}", runtime);
+  return readFileSync(path.join(root, "out/webview/main.js"), "utf8");
 }
 
-test("embedded Tree View script has valid JavaScript syntax", () => {
-  assert.doesNotThrow(() => new Function(embeddedWebviewScript()));
+test("Webview bundle is self-contained and valid JavaScript", () => {
+  const bundle = embeddedWebviewScript();
+  assert.doesNotThrow(() => new Function(bundle));
+  assert.doesNotMatch(bundle, /\brequire\(/);
+  assert.doesNotMatch(bundle, /jsonc-parser|parseTree/);
 });
 
-test("Tree View markup includes accessible search controls", () => {
-  assert.match(source, /id="search-input"[^>]+aria-label="Search JSON keys and values"/);
-  assert.match(source, /id="previous-match"/);
-  assert.match(source, /id="next-match"/);
-  assert.match(source, /id="clear-search"/);
-  assert.match(source, /id="search-scope-warning"[^>]+>Long values shortened/);
+test("panel loads bundled assets under a nonce-only script CSP", () => {
+  assert.match(hostSource, /script-src 'nonce-\$\{nonce\}'/);
+  assert.doesNotMatch(hostSource, /'unsafe-inline'|'unsafe-eval'/);
+  assert.match(hostSource, /<script nonce="\$\{nonce\}" src="\$\{scriptUri\}"><\/script>/);
+  assert.match(hostSource, /localResourceRoots: \[webviewRoot\(services\.extensionUri\)\]/);
+  assert.match(hostSource, /randomBytes\(16\)/);
+  assert.doesNotMatch(hostSource, /Math\.random/);
+  assert.doesNotMatch(hostSource, /retainContextWhenHidden: true/);
+});
+
+test("Tree View markup includes accessible search and tree controls", () => {
+  assert.match(hostSource, /id="search-input"[^>]+aria-label="Search JSON keys and values"/);
+  assert.match(hostSource, /id="previous-match"/);
+  assert.match(hostSource, /id="next-match"/);
+  assert.match(hostSource, /id="clear-search"/);
+  assert.match(hostSource, /id="search-scope-warning"[^>]+>Long values shortened/);
+  assert.match(hostSource, /id="tree" role="tree" aria-label="JSON tree"/);
 });
 
 test("search runs incrementally inside the Webview", () => {
-  assert.match(source, /createJsonTreeSearchState\(currentRoot, query\)/);
-  assert.match(source, /advanceJsonTreeSearch\(state, 2_000\)/);
-  assert.match(source, /exactIds\.has\(node\.nodeId\)/);
-  assert.doesNotMatch(source, /postMessage\(\{ type: 'search'/);
-});
-
-test("Tree View renders and acts on lossless node tokens", () => {
-  assert.match(source, /span\.textContent = model\.raw/);
-  assert.match(source, /type: 'copyRawString', nodeId: model\.id/);
-  assert.match(source, /type: 'copyValue', nodeId: model\.id/);
-  assert.doesNotMatch(source, /JSON\.stringify\(value, null, 2\)/);
+  assert.match(webviewSource, /createJsonTreeSearchState\(currentRoot, query\)/);
+  assert.match(webviewSource, /advanceJsonTreeSearch\(state, 2_000\)/);
+  assert.match(webviewSource, /exactIds\.has\(node\.nodeId\)/);
 });
 
 test("Webview actions send only host-resolved node IDs", () => {
@@ -63,26 +59,20 @@ test("Webview actions send only host-resolved node IDs", () => {
     "copyJsonPath",
     "copyJqPath",
   ]) {
-    assert.match(source, new RegExp(`type: '${type}', nodeId: model\\.id`));
+    assert.match(webviewSource, new RegExp(`type: "${type}", nodeId: model\\.id`));
   }
-  assert.match(source, /Copy raw key token/);
-  assert.doesNotMatch(source, /vscode\.postMessage\(\{[^}]*\b(?:text|path)\s*:/);
-  assert.doesNotMatch(source, /message\.(?:text|path)\b/);
-  assert.match(source, /buildJsonTreeContextIndex\(candidate\.tree\)/);
-  assert.match(source, /isValidJsonTreeNodeId\(message\.nodeId\)/);
-  assert.match(source, /hasDuplicateKeyInPath/);
+  assert.match(webviewSource, /Copy raw key token/);
+  assert.doesNotMatch(webviewSource, /vscode\.postMessage\(\{[^}]*\b(?:text|path)\s*:/);
+  assert.doesNotMatch(hostSource, /message\.(?:text|path)\b/);
+  assert.match(hostSource, /buildJsonTreeContextIndex\(init\.candidate\.tree\)/);
+  assert.match(hostSource, /isValidJsonTreeNodeId\(message\.nodeId\)/);
+  assert.match(hostSource, /hasDuplicateKeyInPath/);
 });
 
 test("nested Tree Views open as new tabs in the source editor group", () => {
-  assert.match(
-    source,
-    /viewColumn: vscode\.ViewColumn = vscode\.ViewColumn\.Beside/,
-  );
-  assert.match(
-    source,
-    /displayPath,\s*this\.panel\.viewColumn \?\? vscode\.ViewColumn\.Active,/,
-  );
-  assert.match(source, /viewColumn: vscode\.ViewColumn\.Beside,/);
+  assert.match(hostSource, /init\.viewColumn \?\? vscode\.ViewColumn\.Beside/);
+  assert.match(hostSource, /viewColumn: this\.panel\.viewColumn \?\? vscode\.ViewColumn\.Active,/);
+  assert.match(hostSource, /viewColumn: vscode\.ViewColumn\.Beside \}/);
 });
 
 test("JSONL Tree Views expose in-panel record navigation", () => {
@@ -97,48 +87,49 @@ test("JSONL Tree Views expose in-panel record navigation", () => {
     "follow-cursor",
     "jsonl-status",
   ]) {
-    assert.match(source, new RegExp(`id="${id}"`));
+    assert.match(hostSource, new RegExp(`id="${id}"`));
   }
-  for (const type of [
-    "previousJsonl",
-    "nextJsonl",
-    "goToJsonlLine",
-    "revealSource",
-    "setFollowCursor",
-  ]) {
-    assert.match(source, new RegExp(`type: '${type}'`));
+  for (const type of ["previousJsonl", "nextJsonl", "goToJsonlLine", "revealSource", "setFollowCursor"]) {
+    assert.match(webviewSource, new RegExp(`type: "${type}"`));
   }
-  assert.match(source, /findJsonlRecord/);
-  assert.match(source, /onDidChangeTextEditorSelection/);
-  assert.match(source, /setTimeout\(\(\) => void this\.followSourceLine\(lineNumber\), 150\)/);
+  assert.match(hostSource, /findJsonlRecord/);
+  assert.match(hostSource, /onDidChangeTextEditorSelection/);
+  assert.match(hostSource, /this\.followSourceLine\(lineNumber\)\.catch/);
+});
+
+test("JSONL navigation always clears its busy state", () => {
+  assert.match(hostSource, /finally \{\s*if \(finalStatus !== undefined && isCurrent\(\)\) await this\.postJsonlState\(finalStatus\)/);
+});
+
+test("following the cursor never opens a candidate picker", () => {
+  const follow = hostSource.slice(hostSource.indexOf("private async followSourceLine"), hostSource.indexOf("private async revealSourceLine"));
+  assert.doesNotMatch(follow, /pickCandidate/);
+  assert.match(follow, /candidates\[0\]/);
 });
 
 test("Tree rows use compact container counts without visual type badges", () => {
-  assert.match(source, /\? '\[' \+ count \+ '\]' : '\{' \+ count \+ '\}'/);
-  assert.doesNotMatch(source, /badge\.textContent = model\.type/);
-  assert.match(source, /row\.setAttribute\('aria-label', key \+ ': ' \+ model\.type\)/);
+  assert.match(webviewSource, /\? "\[" \+ count \+ "\]" : "\{" \+ count \+ "\}"/);
+  assert.doesNotMatch(webviewSource, /badge\.textContent = model\.type/);
+  assert.match(webviewSource, /node\.setAttribute\("aria-label", key \+ ": " \+ describeValue\(model\)\)/);
 });
 
 test("Webview model truncation is explicit and limits search scope", () => {
-  assert.match(source, /createJsonTreeWebviewModel\(candidate\.tree\)/);
-  assert.match(source, /const displayPath = formatJsonPathForDisplay\(materializeJsonTreePath\(context\)\)/);
-  assert.doesNotMatch(source, /const jsonPath = formatJsonPath\(materializeJsonTreePath\(context\)\)/);
-  assert.match(source, /truncatedFieldCount: this\.webviewModel\.truncatedFieldCount/);
-  assert.match(source, /Search displayed text \(long values shortened\)/);
-  assert.match(source, /copy and open actions still use the complete host value/i);
-  assert.match(source, /'… ' \+ longest\.toLocaleString\(\) \+ ' chars'/);
+  assert.match(hostSource, /createJsonTreeWebviewModel\(tree\)/);
+  assert.match(hostSource, /const displayPath = formatJsonPathForDisplay\(materializeJsonTreePath\(context\)\)/);
+  assert.match(hostSource, /truncatedFieldCount: model\.truncatedFieldCount/);
+  assert.match(webviewSource, /Search displayed text \(long values shortened\)/);
+  assert.match(hostSource, /copy and open actions still use the complete host value/i);
+  assert.match(webviewSource, /"… " \+ longest\.toLocaleString\(\) \+ " chars"/);
 });
 
 test("bulk tree operations are iterative, chunked, and size-limited", () => {
-  assert.match(source, /canExpandAll: isTreeNodeCountWithinLimit/);
-  assert.match(source, /else if \(expandAllAllowed\) \{\s*runRootExpansion\(\)/);
-  assert.match(source, /performance\.now\(\) - startedAt < 8/);
-  assert.match(source, /createdInChunk < MATERIALIZE_CHILD_CHUNK_SIZE/);
-  assert.match(source, /setTimeout\(processMaterializeChunk, 0\)/);
-  assert.match(source, /isMatchBranch &&[\s\S]+node\.ensureExpanded/);
-  assert.match(source, /shouldExpand &&[\s\S]+node\.ensureExpanded/);
-  assert.match(source, /collapseAllButton\.disabled = searchActive/);
-  assert.doesNotMatch(source, /setExpanded\(shouldExpand, true\)/);
+  assert.match(hostSource, /canExpandAll: isTreeNodeCountWithinLimit/);
+  assert.match(webviewSource, /else if \(expandAllAllowed\) \{\s*runRootExpansion\(\)/);
+  assert.match(webviewSource, /performance\.now\(\) - startedAt < 8/);
+  assert.match(webviewSource, /createdInChunk < MATERIALIZE_CHILD_CHUNK_SIZE/);
+  assert.match(webviewSource, /setTimeout\(processMaterializeChunk, 0\)/);
+  assert.match(webviewSource, /isMatchBranch &&[\s\S]+node\.ensureExpanded/);
+  assert.doesNotMatch(webviewSource, /setExpanded\(shouldExpand, true\)/);
 });
 
 test("oversized roots stay collapsed and manual expansion materializes cancellable chunks", () => {
@@ -191,7 +182,7 @@ function renderTree(harness: ReturnType<typeof createWebviewHarness>, root: unkn
   const onMessage = harness.windowListeners.get("message")?.[0];
   assert.ok(onMessage);
   onMessage({ data: {
-    type: "render", root, title: "test", pathLabel: "$", autoExpand: false,
+    type: "render", renderKey: 0, root, title: "test", pathLabel: "$", autoExpand: false,
     canExpandAll: true, expandAllLimit: 10_000, ...options,
   } });
 }
@@ -288,4 +279,110 @@ test("partial recovery warning resets when navigating back to a complete value",
   harness.drainTimers();
   assert.equal(warning.classList.contains("hidden"), true);
   assert.equal(warning.textContent, "");
+});
+
+
+function searchFor(harness: ReturnType<typeof createWebviewHarness>, query: string): void {
+  harness.elements.get("search-input")!.value = query;
+  harness.elements.get("search-input")!.dispatch("input");
+  harness.drainTimers();
+}
+
+test("nodes can be expanded and collapsed manually while search results are shown", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  renderTree(harness, arrayOfSmallObjects(3));
+  harness.drainTimers();
+  searchFor(harness, "value");
+  const root = harness.elements.get("tree")!.children[0];
+  const first = root.children[1].children[0];
+  assert.equal(first.attributes.get("aria-expanded"), "true");
+  first.children[0].dispatch("click");
+  assert.equal(first.attributes.get("aria-expanded"), "false", "a matched branch can be collapsed during search");
+  first.children[0].dispatch("click");
+  harness.drainTimers();
+  assert.equal(first.attributes.get("aria-expanded"), "true");
+  assert.equal(harness.elements.get("collapse-all")!.disabled, false, "Collapse all stays available during search");
+  harness.elements.get("collapse-all")!.dispatch("click");
+  harness.drainTimers();
+  assert.equal(root.attributes.get("aria-expanded"), "false");
+});
+
+test("expanding a non-matching branch during search reveals its children", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  const tree = {
+    id: 0, type: "object", children: [
+      { key: "hit", rawKey: '"hit"', value: { id: 1, type: "number", raw: "1" } },
+      { key: "other", rawKey: '"other"', value: { id: 2, type: "object", children: [
+        { key: "inner", rawKey: '"inner"', value: { id: 3, type: "number", raw: "2" } },
+      ] } },
+    ],
+  };
+  renderTree(harness, tree);
+  harness.drainTimers();
+  searchFor(harness, "hit");
+  const root = harness.elements.get("tree")!.children[0];
+  const other = root.children[1].children[1];
+  assert.equal(other.classList.contains("search-hidden"), true);
+  other.children[0].dispatch("click");
+  harness.drainTimers();
+  assert.equal(other.attributes.get("aria-expanded"), "true");
+  assert.equal(other.children[1].children[0].classList.contains("search-hidden"), false);
+});
+
+test("tree rows support WAI-ARIA keyboard navigation with a roving tabindex", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  renderTree(harness, arrayOfSmallObjects(2));
+  harness.drainTimers();
+  const tree = harness.elements.get("tree")!;
+  const root = tree.children[0] as unknown as { tabIndex: number; attributes: Map<string, string>; children: Array<{ tabIndex: number; attributes: Map<string, string> }> };
+  const key = (name: string) => tree.dispatch("keydown", { key: name, preventDefault() {} });
+  assert.equal(root.tabIndex, 0);
+  assert.equal(root.attributes.get("aria-level"), "1");
+  key("ArrowDown");
+  const first = (root.children[1] as unknown as { children: Array<{ tabIndex: number; attributes: Map<string, string> }> }).children[0];
+  assert.equal(first.tabIndex, 0);
+  assert.equal(root.tabIndex, -1);
+  assert.equal(first.attributes.get("aria-level"), "2");
+  key("ArrowRight");
+  harness.drainTimers();
+  assert.equal(first.attributes.get("aria-expanded"), "true");
+  key("ArrowLeft");
+  assert.equal(first.attributes.get("aria-expanded"), "false");
+  key("ArrowLeft");
+  assert.equal(root.tabIndex, 0, "ArrowLeft on a collapsed node moves to its parent");
+  key("End");
+  const second = (root.children[1] as unknown as { children: Array<{ tabIndex: number }> }).children[1];
+  assert.equal(second.tabIndex, 0);
+  key("Home");
+  assert.equal(root.tabIndex, 0);
+});
+
+test("expansion, search, and scroll state survive the Webview being discarded", () => {
+  let saved: unknown;
+  const api = { getState: () => saved, setState: (state: unknown) => { saved = state; } };
+  const first = createWebviewHarness(embeddedWebviewScript(), api);
+  renderTree(first, arrayOfSmallObjects(3), { renderKey: 4 });
+  first.drainTimers();
+  const firstRoot = first.elements.get("tree")!.children[0];
+  firstRoot.children[1].children[1].children[0].dispatch("click");
+  first.drainTimers();
+  (first.elements.get("tree") as unknown as { scrollTop: number }).scrollTop = 42;
+  first.elements.get("tree")!.dispatch("scroll");
+  first.drainTimers();
+  assert.deepEqual((saved as { expanded: number[] }).expanded.sort(), [0, 3]);
+
+  const restored = createWebviewHarness(embeddedWebviewScript(), api);
+  renderTree(restored, arrayOfSmallObjects(3), { renderKey: 4 });
+  restored.drainTimers();
+  const root = restored.elements.get("tree")!.children[0];
+  assert.equal(root.attributes.get("aria-expanded"), "true");
+  assert.equal(root.children[1].children[1].attributes.get("aria-expanded"), "true");
+  assert.equal(root.children[1].children[0].attributes.get("aria-expanded"), "false");
+  assert.equal((restored.elements.get("tree") as unknown as { scrollTop: number }).scrollTop, 42);
+
+  const otherRecord = createWebviewHarness(embeddedWebviewScript(), api);
+  renderTree(otherRecord, arrayOfSmallObjects(3), { renderKey: 5 });
+  otherRecord.drainTimers();
+  const otherRoot = otherRecord.elements.get("tree")!.children[0];
+  assert.equal(otherRoot.children[1].children[1].attributes.get("aria-expanded"), "false", "state for another value is ignored");
 });

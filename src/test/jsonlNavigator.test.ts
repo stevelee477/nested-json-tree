@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { jsonTreeToValue } from "../jsonTree";
 import { findJsonlRecord } from "../jsonlNavigator";
 import { JsonProcessingLimitError, parseJsonCandidates } from "../parser";
 
@@ -21,7 +22,7 @@ test("finds the next valid JSONL record while skipping empty and invalid lines",
   if (result.status !== "found") return;
   assert.equal(result.record.lineNumber, 3);
   assert.equal(result.record.skippedLines, 2);
-  assert.deepEqual(result.record.candidates[0].value, { next: 2 });
+  assert.deepEqual(jsonTreeToValue(result.record.candidates[0].tree), { next: 2 });
 });
 
 test("finds previous records and stops at document boundaries", async () => {
@@ -95,7 +96,7 @@ test("JSONL navigation includes recoverable lines and multiple values on a line"
   assert.equal(result.status, "found");
   if (result.status !== "found") return;
   assert.equal(result.record.lineNumber, 1);
-  assert.deepEqual(result.record.candidates.map((candidate) => candidate.value), [{ id: 1 }, { next: 2 }]);
+  assert.deepEqual(result.record.candidates.map((candidate) => jsonTreeToValue(candidate.tree)), [{ id: 1 }, { next: 2 }]);
   assert.ok(result.record.candidates[0].recovery);
   assert.equal(result.record.candidates[1].recovery, undefined);
 });

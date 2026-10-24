@@ -12,7 +12,7 @@ export async function run(): Promise<void> {
   );
   assert.ok(extension, `Could not find the ${EXTENSION_NAME} development extension.`);
 
-  await extension.activate();
+  const api = (await extension.activate()) as { readyWebviewCount(): number };
   assert.equal(extension.isActive, true, "The extension should be active after activation.");
 
   const commands = await vscode.commands.getCommands(true);
@@ -22,9 +22,23 @@ export async function run(): Promise<void> {
     `${OPEN_CURRENT_LINE_COMMAND} should be registered.`,
   );
 
-  await verifyOpenDocumentCommand();
-  await verifyOpenCurrentLineCommand();
-  await verifyRecoveredDocumentCommand();
+  await expectWebviewReady(api, verifyOpenDocumentCommand);
+  await expectWebviewReady(api, verifyOpenCurrentLineCommand);
+  await expectWebviewReady(api, verifyRecoveredDocumentCommand);
+}
+
+/** Proves the bundled Webview script loaded under the panel CSP and reached the host. */
+async function expectWebviewReady(
+  api: { readyWebviewCount(): number },
+  openPanel: () => Promise<void>,
+): Promise<void> {
+  const before = api.readyWebviewCount();
+  await openPanel();
+  const deadline = Date.now() + 10_000;
+  while (api.readyWebviewCount() <= before) {
+    if (Date.now() > deadline) throw new Error("The Tree View Webview script never reported ready.");
+    await delay(50);
+  }
 }
 
 async function verifyOpenDocumentCommand(): Promise<void> {

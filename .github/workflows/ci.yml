@@ -30,7 +30,11 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm audit --audit-level=high
+      # Only jsonc-parser ships in the VSIX; gate it strictly. Dev tooling
+      # (vsce's optional Azure publishing auth) is gated on critical issues.
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm audit --audit-level=critical
+      - run: npm run lint
       - run: npm test
       - name: Test in VS Code Extension Host
         run: xvfb-run -a npm run test:integration

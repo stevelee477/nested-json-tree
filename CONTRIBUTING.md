@@ -10,7 +10,7 @@ npm test
 npm run test:integration
 ```
 
-Press `F5` in VS Code to launch an Extension Development Host. Use the synthetic files in `examples/` for manual testing.
+Run `npm run watch` to rebuild the extension and Webview bundles on change, then press `F5` in VS Code to launch an Extension Development Host. Use the synthetic files in `examples/` for manual testing.
 
 ## Pull requests
 

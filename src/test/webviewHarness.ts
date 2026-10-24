@@ -1,5 +1,8 @@
 /** Minimal DOM harness for executing the actual embedded Webview script. */
-export function createWebviewHarness(script: string) {
+export function createWebviewHarness(
+  script: string,
+  api: { getState?: () => unknown; setState?: (state: unknown) => void } = {},
+) {
   class FakeClassList {
     private readonly names = new Set<string>();
 
@@ -33,6 +36,8 @@ export function createWebviewHarness(script: string) {
     title = "";
     value = "";
     disabled = false;
+    tabIndex = 0;
+    scrollTop = 0;
 
     constructor(readonly fragment = false) {}
 
@@ -139,7 +144,7 @@ export function createWebviewHarness(script: string) {
     "performance",
     script,
   );
-  run(window, document, () => ({ postMessage: () => {} }), setTimeout, () => {}, { now: () => 0 });
+  run(window, document, () => ({ postMessage: () => {}, ...api }), setTimeout, () => {}, { now: () => 0 });
 
   const drainTimers = (maxTurns = 10_000): number => {
     let turns = 0;

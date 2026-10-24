@@ -7,13 +7,12 @@ import {
   parseTree,
   printParseErrorCode,
 } from "jsonc-parser";
-import { JsonTreeNode, buildJsonTree, jsonTreeToValue } from "./jsonTree";
+import { JsonTreeNode, buildJsonTree } from "./jsonTree";
 
 export type JsonPrimitive = null | boolean | number | string;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
 export interface JsonCandidate {
-  value: JsonValue;
   /** Lossless syntax tree used for display, copy, search, and serialization. */
   tree: JsonTreeNode;
   /** Number of value nodes in tree, used for aggregate resource accounting. */
@@ -36,11 +35,13 @@ export interface JsonRecovery {
 export interface JsonParseOptions {
   /** Disable to extract only complete JSON/JSONC values. Defaults to true. */
   allowPartial?: boolean;
+  /** Total value nodes allowed across all candidates. Defaults to MAX_JSON_VALUE_NODES. */
+  maxValueNodes?: number;
 }
 
 export const MAX_INPUT_BYTES = 100 * 1024 * 1024;
 export const MAX_JSON_NESTING = 1_024;
-export const MAX_JSON_VALUE_NODES = 100_000;
+export const MAX_JSON_VALUE_NODES = 500_000;
 export const MAX_CONTAINER_SPANS = 50_000;
 export const MAX_JSON_CANDIDATES = 5_000;
 const MAX_UNWRAP_DEPTH = 10;
@@ -107,16 +108,17 @@ export function assertInputSize(text: string): void {
  * prefixes/suffixes, it scans for balanced object/array candidates instead.
  */
 export function parseJsonCandidates(text: string, options: JsonParseOptions = {}): JsonCandidate[] {
+  const maxValueNodes = normalizeValueNodeLimit(options.maxValueNodes);
   const bounds = trimmedBounds(text);
   let attemptedWholeDocument = false;
   if (bounds.start < bounds.end) {
     const raw = text.slice(bounds.start, bounds.end);
-    const parsed = tryParse(raw);
+    const parsed = tryParse(raw, maxValueNodes);
     attemptedWholeDocument = true;
     if (parsed.ok) {
       return isEmptyContainer(parsed.tree)
         ? []
-        : [{ ...parsed, raw, start: bounds.start, end: bounds.end, unwrapDepth: 0 }];
+        : [{ tree: parsed.tree, nodeCount: parsed.nodeCount, raw, start: bounds.start, end: bounds.end, unwrapDepth: 0 }];
     }
   }
 
@@ -126,6 +128,7 @@ export function parseJsonCandidates(text: string, options: JsonParseOptions = {}
     strictScan.spans,
     bounds,
     attemptedWholeDocument,
+    maxValueNodes,
   );
 
   // Prefix text can itself be malformed, for example an unmatched quote or a
@@ -141,6 +144,7 @@ export function parseJsonCandidates(text: string, options: JsonParseOptions = {}
       recoverySpans,
       bounds,
       attemptedWholeDocument,
+      maxValueNodes,
     );
     recoveryCandidates = filterCandidatesInsideRanges(
       recoveryCandidates,
@@ -158,22 +162,37 @@ export function parseJsonCandidates(text: string, options: JsonParseOptions = {}
   const complete = strictCandidates.length === 0
     ? recoveryCandidates
     : mergeCandidateViews(strictCandidates, recoveryCandidates);
-  const merged = options.allowPartial === false
+  assertCandidateNodeTotal(complete, maxValueNodes);
+  return options.allowPartial === false
     ? complete
-    : recoverPartialCandidates(text, [...strictScan.spans, ...recoverySpans], strictScan.prefixSyntaxRanges, complete);
-  assertCandidateNodeTotal(merged);
-  return merged;
+    : recoverPartialCandidates(
+        text,
+        [...strictScan.spans, ...recoverySpans],
+        strictScan.prefixSyntaxRanges,
+        complete,
+        maxValueNodes,
+      );
 }
 
-/** Recover only explicit syntax-tree fields, never invent values or repair tokens. */
+/**
+ * Recover only explicit syntax-tree fields, never invent values or repair tokens.
+ * Recovery is best effort: a span that hits a structural limit is skipped, and
+ * recovery stops before the candidate or node budget would be exceeded, so it
+ * never discards complete candidates that were already proven.
+ */
 function recoverPartialCandidates(
   text: string,
   spans: ContainerSpan[],
   prefixRanges: TextRange[],
   complete: JsonCandidate[],
+  maxValueNodes: number,
 ): JsonCandidate[] {
-  let merged = [...complete];
   const ordered = spans.sort((left, right) => left.start - right.start);
+  const boundaries = findRecordBoundaries(text, ordered);
+  const removed = new Set<JsonCandidate>();
+  const recovered: JsonCandidate[] = [];
+  let candidateCount = complete.length;
+  let nodeTotal = complete.reduce((total, candidate) => total + candidate.nodeCount, 0);
   let lastStart = -1;
   let acceptedEnd = -1;
   let remainingCharacters = text.length * MAX_OVERLAPPING_PARSE_FACTOR;
@@ -182,64 +201,170 @@ function recoverPartialCandidates(
     if (span.start === lastStart) continue;
     lastStart = span.start;
     if (span.start < acceptedEnd) continue;
-    let end = span.end ?? text.length;
+    // An unclosed container never extends past the next log-record opener, so
+    // a run of truncated records is recovered record by record instead of the
+    // first one swallowing the rest (and re-parsing to EOF for every record).
+    let end = span.end ?? boundaries[firstIndexAfter(boundaries, span.start)] ?? text.length;
     while (rangeIndex < prefixRanges.length && prefixRanges[rangeIndex].end <= span.start) rangeIndex += 1;
     const prefixRange = prefixRanges[rangeIndex];
     // Never recover a value from a balanced prefix quote/comment, even if the
     // permissive scanner lost its closing delimiter.
     if (prefixRange && span.start >= prefixRange.start && span.start < prefixRange.end) continue;
-    if (merged.some((candidate) => candidate.start <= span.start && candidate.end >= end)) continue;
+    const containing = complete[lastIndexAtOrBefore(complete, span.start)];
+    if (containing && !removed.has(containing) && containing.end >= end) continue;
     const parse = (): ReturnType<typeof tryParsePartial> => {
       const length = end - span.start;
       if (length <= 0 || length > remainingCharacters) return undefined;
       remainingCharacters -= length;
-      return tryParsePartial(text.slice(span.start, end));
+      try {
+        return tryParsePartial(text.slice(span.start, end), maxValueNodes);
+      } catch (error) {
+        if (error instanceof JsonProcessingLimitError) return undefined;
+        throw error;
+      }
     };
     let parsed = parse();
     if (!parsed) continue;
-    // A broken outer value must not swallow a later complete record or an
-    // inner candidate that the tolerant parser did not actually retain.
-    const unretained = merged.find((candidate) =>
-      candidate.start >= span.start && candidate.start < span.start + parsed!.length &&
-      !parsed!.containerRanges.some((range) =>
-        span.start + range.start === candidate.start && span.start + range.end === candidate.end,
-      ),
-    );
-    if (unretained) {
-      end = unretained.start;
+    // A broken outer value must not swallow a later complete record, a later
+    // log record, or an inner candidate that the tolerant parser did not
+    // actually retain.
+    const cut = firstUnretainedStart(span.start, parsed, complete, boundaries);
+    if (cut !== undefined) {
+      end = cut;
       parsed = parse();
       if (!parsed) continue;
     }
-    const candidate: JsonCandidate = {
-      value: jsonTreeToValue(parsed.tree),
+    const candidateEnd = span.start + parsed.length;
+    const overlapping: JsonCandidate[] = [];
+    let outside = false;
+    for (let index = Math.max(0, lastIndexAtOrBefore(complete, span.start)); index < complete.length; index += 1) {
+      const item = complete[index];
+      if (item.start >= candidateEnd) break;
+      if (removed.has(item) || item.end <= span.start) continue;
+      if (item.start < span.start || item.end > candidateEnd) outside = true;
+      overlapping.push(item);
+    }
+    if (outside) continue;
+    // Recovery must confirm some data of its own; wrapping complete values in
+    // damaged prefix brackets would only hide them.
+    if (parsed.primitiveCount <= overlapping.reduce((total, item) => total + countPrimitives(item.tree), 0)) continue;
+    const nextNodeTotal = nodeTotal + parsed.nodeCount -
+      overlapping.reduce((total, item) => total + item.nodeCount, 0);
+    const nextCandidateCount = candidateCount + 1 - overlapping.length;
+    if (nextNodeTotal > maxValueNodes || nextCandidateCount > MAX_JSON_CANDIDATES) break;
+    for (const item of overlapping) removed.add(item);
+    recovered.push({
       tree: parsed.tree,
       nodeCount: parsed.nodeCount,
-      raw: text.slice(span.start, span.start + parsed.length),
+      raw: text.slice(span.start, candidateEnd),
       start: span.start,
-      end: span.start + parsed.length,
+      end: candidateEnd,
       unwrapDepth: 0,
       recovery: parsed.recovery,
-    };
-    const overlapping = merged.filter((item) => item.start < candidate.end && candidate.start < item.end);
-    if (overlapping.some((item) => item.start < candidate.start || item.end > candidate.end)) continue;
-    merged = merged.filter((item) => !overlapping.includes(item));
-    merged.push(candidate);
-    if (merged.length > MAX_JSON_CANDIDATES) throw new JsonCandidateLimitError();
-    assertCandidateNodeTotal(merged);
-    acceptedEnd = candidate.end;
+    });
+    nodeTotal = nextNodeTotal;
+    candidateCount = nextCandidateCount;
+    acceptedEnd = candidateEnd;
   }
-  return merged.sort((left, right) => left.start - right.start);
+  if (recovered.length === 0) return complete;
+  return [...complete.filter((candidate) => !removed.has(candidate)), ...recovered]
+    .sort((left, right) => left.start - right.start);
 }
 
-function tryParsePartial(raw: string): {
+/** Returns the first complete candidate or log-record opener the partial parse dropped. */
+function firstUnretainedStart(
+  start: number,
+  parsed: NonNullable<ReturnType<typeof tryParsePartial>>,
+  complete: JsonCandidate[],
+  boundaries: number[],
+): number | undefined {
+  const end = start + parsed.length;
+  const retained = new Map<number, number>();
+  for (const range of parsed.containerRanges) retained.set(start + range.start, start + range.end);
+  let cut: number | undefined;
+  for (let index = lastIndexAtOrBefore(complete, start - 1) + 1; index < complete.length; index += 1) {
+    const candidate = complete[index];
+    if (candidate.start >= end) break;
+    if (retained.get(candidate.start) !== candidate.end) {
+      cut = candidate.start;
+      break;
+    }
+  }
+  for (let index = firstIndexAfter(boundaries, start); index < boundaries.length; index += 1) {
+    const boundary = boundaries[index];
+    if (boundary >= end || (cut !== undefined && boundary >= cut)) break;
+    if (!retained.has(boundary)) return boundary;
+  }
+  return cut;
+}
+
+/**
+ * Container openers that look like the start of a new log record: the opener
+ * follows non-JSON text on its line (`ERROR {`), or starts a line after text
+ * that cannot continue a JSON value. Pretty-printed JSON never matches because
+ * its inner openers follow `:`, `,`, `[`, `{`, or start a line after one.
+ */
+function findRecordBoundaries(text: string, orderedSpans: ContainerSpan[]): number[] {
+  const boundaries: number[] = [];
+  let lineStart = 0;
+  let scanned = 0;
+  let lastStart = -1;
+  const isWhitespace = (char: string): boolean => char === " " || char === "\t" || char === "\r" || char === "\n";
+  const continuesJson = (char: string): boolean => char === ":" || char === "," || char === "[" || char === "{";
+  for (const span of orderedSpans) {
+    if (span.start === lastStart) continue;
+    lastStart = span.start;
+    for (; scanned < span.start; scanned += 1) {
+      if (text[scanned] === "\n" || text[scanned] === "\r") lineStart = scanned + 1;
+    }
+    let index = span.start - 1;
+    while (index >= lineStart && isWhitespace(text[index])) index -= 1;
+    if (index >= lineStart) {
+      if (!continuesJson(text[index])) boundaries.push(span.start);
+      continue;
+    }
+    if (lineStart === 0) continue;
+    index = lineStart - 1;
+    while (index >= 0 && isWhitespace(text[index])) index -= 1;
+    if (index >= 0 && !continuesJson(text[index])) boundaries.push(span.start);
+  }
+  return boundaries;
+}
+
+/** Index of the first sorted value greater than position. */
+function firstIndexAfter(values: number[], position: number): number {
+  let low = 0;
+  let high = values.length;
+  while (low < high) {
+    const mid = (low + high) >>> 1;
+    if (values[mid] <= position) low = mid + 1;
+    else high = mid;
+  }
+  return low;
+}
+
+/** Index of the last start-sorted candidate starting at or before position, or -1. */
+function lastIndexAtOrBefore(candidates: JsonCandidate[], position: number): number {
+  let low = 0;
+  let high = candidates.length;
+  while (low < high) {
+    const mid = (low + high) >>> 1;
+    if (candidates[mid].start <= position) low = mid + 1;
+    else high = mid;
+  }
+  return low - 1;
+}
+
+function tryParsePartial(raw: string, maxValueNodes: number): {
   tree: JsonTreeNode;
   nodeCount: number;
+  primitiveCount: number;
   length: number;
   recovery: JsonRecovery;
   containerRanges: TextRange[];
 } | undefined {
   const errors: ParseError[] = [];
-  assertJsonComplexityWithinLimits(raw);
+  if (assertJsonComplexityWithinLimits(raw, maxValueNodes) === undefined) return undefined;
   let root: JsoncNode | undefined;
   try {
     root = parseTree(raw, errors, { allowTrailingComma: true, disallowComments: false });
@@ -273,7 +398,7 @@ function tryParsePartial(raw: string): {
       // The scanner splits invalid numbers such as 01 / 12abc / 1.2.3 into
       // several tokens. Require JSON token boundaries, not just ASCII suffix
       // checks, so Unicode and punctuation cannot leave a misleading prefix.
-      const boundary = /[ \t\r\n,\[\]{}:"]/;
+      const boundary = /[ \t\r\n,[\]{}:"]/;
       const start = node.offset;
       if (start > 0 && !boundary.test(raw[start - 1]) &&
           raw.slice(Math.max(0, start - 2), start) !== "*/") return false;
@@ -335,7 +460,7 @@ function tryParsePartial(raw: string): {
   // A chain of empty damaged wrappers has no confirmed data to recover.
   if (primitiveCount === 0 && nodeCount > 1 && errors.length > 1) return undefined;
   return {
-    tree, nodeCount, length: root.length, containerRanges,
+    tree, nodeCount, primitiveCount, length: root.length, containerRanges,
     recovery: {
       errorCount: errors.length,
       issues: errors.slice(0, 20).map((error) => ({
@@ -390,14 +515,20 @@ function mergeCandidateViews(
   return merged.sort((left, right) => left.start - right.start);
 }
 
-function assertCandidateNodeTotal(candidates: JsonCandidate[]): void {
+function assertCandidateNodeTotal(candidates: JsonCandidate[], maxValueNodes: number): void {
   let total = 0;
   for (const candidate of candidates) {
     total += candidate.nodeCount;
-    if (total > MAX_JSON_VALUE_NODES) {
-      throw new JsonValueNodeLimitError();
+    if (total > maxValueNodes) {
+      throw new JsonValueNodeLimitError(maxValueNodes);
     }
   }
+}
+
+function normalizeValueNodeLimit(value: number | undefined): number {
+  return value !== undefined && Number.isFinite(value) && value >= 1
+    ? Math.trunc(value)
+    : MAX_JSON_VALUE_NODES;
 }
 
 function parseContainerSpans(
@@ -405,6 +536,7 @@ function parseContainerSpans(
   spans: ContainerSpan[],
   bounds: { start: number; end: number },
   attemptedWholeDocument: boolean,
+  maxValueNodes: number,
 ): JsonCandidate[] {
   const candidates: JsonCandidate[] = [];
   const skippedSpans: ContainerSpan[] = [];
@@ -432,17 +564,18 @@ function parseContainerSpans(
     }
     remainingParseCharacters -= length;
     const raw = text.slice(span.start, span.end);
-    const parsed = tryParse(raw);
+    const parsed = tryParse(raw, maxValueNodes);
     if (parsed.ok && !isEmptyContainer(parsed.tree)) {
       if (candidates.length >= MAX_JSON_CANDIDATES) {
         throw new JsonCandidateLimitError();
       }
       candidateNodeTotal += parsed.nodeCount;
-      if (candidateNodeTotal > MAX_JSON_VALUE_NODES) {
-        throw new JsonValueNodeLimitError();
+      if (candidateNodeTotal > maxValueNodes) {
+        throw new JsonValueNodeLimitError(maxValueNodes);
       }
       candidates.push({
-        ...parsed,
+        tree: parsed.tree,
+        nodeCount: parsed.nodeCount,
         raw,
         start: span.start,
         end: span.end,
@@ -468,7 +601,7 @@ function parseContainerSpans(
     }
     rescueCharacters -= length;
     const raw = text.slice(span.start, end);
-    const parsed = tryParse(raw);
+    const parsed = tryParse(raw, maxValueNodes);
     if (!parsed.ok || isEmptyContainer(parsed.tree)) {
       continue;
     }
@@ -483,10 +616,10 @@ function parseContainerSpans(
       throw new JsonCandidateLimitError();
     }
     candidateNodeTotal += parsed.nodeCount;
-    if (candidateNodeTotal > MAX_JSON_VALUE_NODES) {
-      throw new JsonValueNodeLimitError();
+    if (candidateNodeTotal > maxValueNodes) {
+      throw new JsonValueNodeLimitError(maxValueNodes);
     }
-    candidates.push({ ...parsed, raw, start: span.start, end, unwrapDepth: 0 });
+    candidates.push({ tree: parsed.tree, nodeCount: parsed.nodeCount, raw, start: span.start, end, unwrapDepth: 0 });
   }
   return candidates.sort((left, right) => left.start - right.start);
 }
@@ -495,12 +628,12 @@ function parseContainerSpans(
  * Repeatedly JSON-decodes a string. This handles both already-unescaped JSON
  * strings and values that were encoded more than once.
  */
-export function parseNestedJsonCandidates(text: string): JsonCandidate[] {
+export function parseNestedJsonCandidates(text: string, options: JsonParseOptions = {}): JsonCandidate[] {
   let current = text;
   let lastStringCandidate: JsonCandidate | undefined;
 
   for (let depth = 0; depth <= MAX_UNWRAP_DEPTH; depth += 1) {
-    const candidates = parseJsonCandidates(current).map((candidate) => ({
+    const candidates = parseJsonCandidates(current, options).map((candidate) => ({
       ...candidate,
       unwrapDepth: depth,
     }));
@@ -527,11 +660,6 @@ export function parseNestedJsonCandidates(text: string): JsonCandidate[] {
 export function candidatePreview(candidate: JsonCandidate, maxLength = 100): string {
   const compact = candidate.raw.replace(/\s+/g, " ").trim();
   return compact.length <= maxLength ? compact : `${compact.slice(0, maxLength - 1)}…`;
-}
-
-/** Returns a complete JSON string literal, including quotes and escapes. */
-export function encodeJsonStringLiteral(value: string): string {
-  return JSON.stringify(value);
 }
 
 function trimmedBounds(text: string): { start: number; end: number } {
@@ -646,9 +774,8 @@ function scanContainerSpans(
       continue;
     }
     if (char === "{" || char === "[") {
-      if (stack.length >= MAX_JSON_NESTING) {
-        throw new JsonNestingTooDeepError();
-      }
+      // Unmatched openers in log text stay on the stack forever, so stack size
+      // is not nesting depth. Real nesting is enforced when a span is parsed.
       if (spans.length >= MAX_CONTAINER_SPANS) {
         throw new JsonContainerScanLimitError();
       }
@@ -684,17 +811,19 @@ function hasUrlSchemeBefore(text: string, slashIndex: number): boolean {
 
 function tryParse(
   raw: string,
-): { ok: true; value: JsonValue; tree: JsonTreeNode; nodeCount: number } | { ok: false } {
+  maxValueNodes: number,
+): { ok: true; tree: JsonTreeNode; nodeCount: number } | { ok: false } {
   const errors: ParseError[] = [];
   try {
-    const nodeCount = assertJsonComplexityWithinLimits(raw);
+    const nodeCount = assertJsonComplexityWithinLimits(raw, maxValueNodes);
+    if (nodeCount === undefined) return { ok: false };
     const root = parseTree(raw, errors, {
       allowTrailingComma: true,
       disallowComments: false,
     });
     if (root === undefined || errors.length > 0) return { ok: false };
     const tree = buildJsonTree(root, raw);
-    return { ok: true, value: jsonTreeToValue(tree), tree, nodeCount };
+    return { ok: true, tree, nodeCount };
   } catch (error) {
     // jsonc-parser recursively builds its AST. Never reinterpret an inner
     // fragment when the complete value only failed because the call stack was
@@ -706,18 +835,27 @@ function tryParse(
   }
 }
 
-/** Counts JSONC structure without building an AST or recursing. */
-function assertJsonComplexityWithinLimits(raw: string): number {
+/**
+ * Counts JSONC structure without building an AST or recursing. Returns
+ * undefined when the text nests past the limit but never closes back to depth
+ * zero: unmatched log-text openers cannot form one complete value, so they are
+ * merely invalid. A balanced over-deep value is rejected with an error instead.
+ */
+function assertJsonComplexityWithinLimits(raw: string, maxValueNodes: number): number | undefined {
   const scanner = createScanner(raw, true);
   const containers: Array<"object" | "array"> = [];
   const objectExpectsKey: boolean[] = [];
   let depth = 0;
   let valueNodes = 0;
+  let exceededNesting = false;
 
   const countValueNode = (): void => {
+    // Past the nesting limit only balance matters: the text is either rejected
+    // as too deep or is not a complete value at all.
+    if (exceededNesting) return;
     valueNodes += 1;
-    if (valueNodes > MAX_JSON_VALUE_NODES) {
-      throw new JsonValueNodeLimitError();
+    if (valueNodes > maxValueNodes) {
+      throw new JsonValueNodeLimitError(maxValueNodes);
     }
   };
 
@@ -725,9 +863,7 @@ function assertJsonComplexityWithinLimits(raw: string): number {
     if (token === SyntaxKind.OpenBraceToken || token === SyntaxKind.OpenBracketToken) {
       countValueNode();
       depth += 1;
-      if (depth > MAX_JSON_NESTING) {
-        throw new JsonNestingTooDeepError();
-      }
+      if (depth > MAX_JSON_NESTING) exceededNesting = true;
       const container = token === SyntaxKind.OpenBraceToken ? "object" : "array";
       containers.push(container);
       objectExpectsKey.push(container === "object");
@@ -757,7 +893,22 @@ function assertJsonComplexityWithinLimits(raw: string): number {
     }
   }
 
+  if (exceededNesting) {
+    if (depth === 0) throw new JsonNestingTooDeepError();
+    return undefined;
+  }
   return valueNodes;
+}
+
+function countPrimitives(root: JsonTreeNode): number {
+  const pending = [root];
+  let count = 0;
+  while (pending.length > 0) {
+    const node = pending.pop() as JsonTreeNode;
+    if (node.children === undefined) count += 1;
+    else for (const child of node.children) pending.push(child.value);
+  }
+  return count;
 }
 
 function isEmptyContainer(tree: JsonTreeNode): boolean {

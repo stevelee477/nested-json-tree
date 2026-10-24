@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
 import test from "node:test";
-import { stringifyJsonTree } from "../jsonTree";
+import { jsonTreeToValue, stringifyJsonTree } from "../jsonTree";
 import {
   InputTooLargeError,
   JsonCandidateLimitError,
@@ -14,7 +14,6 @@ import {
   MAX_JSON_NESTING,
   MAX_JSON_VALUE_NODES,
   assertInputSize,
-  encodeJsonStringLiteral,
   parseJsonCandidates,
   parseNestedJsonCandidates,
 } from "../parser";
@@ -22,31 +21,31 @@ import {
 test("parses a complete JSON document", () => {
   const candidates = parseJsonCandidates('  {"name":"Ada","items":[1,2]}\n');
   assert.equal(candidates.length, 1);
-  assert.deepEqual(candidates[0].value, { name: "Ada", items: [1, 2] });
+  assert.deepEqual(jsonTreeToValue(candidates[0].tree), { name: "Ada", items: [1, 2] });
   assert.equal(candidates[0].tree.type, "object");
 });
 
 test("extracts JSON surrounded by unrelated text", () => {
   const candidates = parseJsonCandidates('INFO response => {"ok":true,"text":"a } b"} elapsed=2ms');
   assert.equal(candidates.length, 1);
-  assert.deepEqual(candidates[0].value, { ok: true, text: "a } b" });
+  assert.deepEqual(jsonTreeToValue(candidates[0].tree), { ok: true, text: "a } b" });
 });
 
 test("recovers from unmatched quotes in unrelated prefix text", () => {
   const candidates = parseJsonCandidates('WARN unmatched " prefix {"ok":true} suffix');
-  assert.deepEqual(candidates.map((candidate) => candidate.value), [{ ok: true }]);
+  assert.deepEqual(candidates.map((candidate) => jsonTreeToValue(candidate.tree)), [{ ok: true }]);
 });
 
 test("ignores brackets inside balanced quoted prefix text", () => {
   assert.deepEqual(
     parseJsonCandidates('prefix "noise { bracket" {"ok":true} suffix').map(
-      (candidate) => candidate.value,
+      (candidate) => jsonTreeToValue(candidate.tree),
     ),
     [{ ok: true }],
   );
   assert.deepEqual(
     parseJsonCandidates('prefix "noise [ bracket" [{"ok":true}] suffix').map(
-      (candidate) => candidate.value,
+      (candidate) => jsonTreeToValue(candidate.tree),
     ),
     [[{ ok: true }]],
   );
@@ -54,11 +53,11 @@ test("ignores brackets inside balanced quoted prefix text", () => {
 
 test("does not surface JSON-looking values inside balanced prefix comments", () => {
   assert.deepEqual(
-    parseJsonCandidates('prefix /* {"fake":1} */ {"real":2}').map((candidate) => candidate.value),
+    parseJsonCandidates('prefix /* {"fake":1} */ {"real":2}').map((candidate) => jsonTreeToValue(candidate.tree)),
     [{ real: 2 }],
   );
   assert.deepEqual(
-    parseJsonCandidates('prefix // {"fake":1}\n {"real":2}').map((candidate) => candidate.value),
+    parseJsonCandidates('prefix // {"fake":1}\n {"real":2}').map((candidate) => jsonTreeToValue(candidate.tree)),
     [{ real: 2 }],
   );
   assert.deepEqual(parseJsonCandidates('// {"fake":1}\n'), []);
@@ -66,7 +65,7 @@ test("does not surface JSON-looking values inside balanced prefix comments", () 
 });
 
 test("recovers from URL-like prefix syntax without weakening malformed inner syntax", () => {
-  assert.deepEqual(parseJsonCandidates('prefix http://host {"ok":1}').map((item) => item.value), [
+  assert.deepEqual(parseJsonCandidates('prefix http://host {"ok":1}').map((item) => jsonTreeToValue(item.tree)), [
     { ok: 1 },
   ]);
   assert.deepEqual(parseJsonCandidates('prefix { bad http://host {"ok":1}'), []);
@@ -76,13 +75,13 @@ test("recovery replaces strict inner fragments with a valid multiline outer cand
   const expected = [[{ a: 1 }, { b: 2 }]];
   assert.deepEqual(
     parseJsonCandidates('INFO http://host [\n {"a":1},\n {"b":2}\n]').map(
-      (candidate) => candidate.value,
+      (candidate) => jsonTreeToValue(candidate.tree),
     ),
     expected,
   );
   assert.deepEqual(
     parseJsonCandidates('INFO // payload [\n {"a":1},\n {"b":2}\n]').map(
-      (candidate) => candidate.value,
+      (candidate) => jsonTreeToValue(candidate.tree),
     ),
     expected,
   );
@@ -90,7 +89,7 @@ test("recovery replaces strict inner fragments with a valid multiline outer cand
 
 test("balanced quoted prefix delimiters cannot trigger the recovery nesting limit", () => {
   const input = `"${"{".repeat(MAX_JSON_NESTING + 1)}" {"ok":1}`;
-  assert.deepEqual(parseJsonCandidates(input).map((candidate) => candidate.value), [{ ok: 1 }]);
+  assert.deepEqual(parseJsonCandidates(input).map((candidate) => jsonTreeToValue(candidate.tree)), [{ ok: 1 }]);
 });
 
 test("parses JSONC comments and trailing commas", () => {
@@ -102,7 +101,7 @@ test("parses JSONC comments and trailing commas", () => {
     }
   `);
   assert.equal(candidates.length, 1);
-  assert.deepEqual(candidates[0].value, { name: "Ada", items: [1, 2] });
+  assert.deepEqual(jsonTreeToValue(candidates[0].tree), { name: "Ada", items: [1, 2] });
   assert.equal(candidates[0].tree.children?.[1].value.type, "array");
 });
 
@@ -122,7 +121,7 @@ test("extracts a JSONC candidate while ignoring braces inside comments", () => {
   } elapsed=2ms`;
   const candidates = parseJsonCandidates(input);
   assert.equal(candidates.length, 1);
-  assert.deepEqual(candidates[0].value, { ok: true });
+  assert.deepEqual(jsonTreeToValue(candidates[0].tree), { ok: true });
   assert.equal(candidates[0].raw.startsWith("{"), true);
   assert.equal(candidates[0].raw.endsWith("}"), true);
 });
@@ -130,19 +129,19 @@ test("extracts a JSONC candidate while ignoring braces inside comments", () => {
 test("returns multiple top-level JSON candidates", () => {
   const candidates = parseJsonCandidates('left {"a":1} middle [2,3] right');
   assert.equal(candidates.length, 2);
-  assert.deepEqual(candidates.map((candidate) => candidate.value), [{ a: 1 }, [2, 3]]);
+  assert.deepEqual(candidates.map((candidate) => jsonTreeToValue(candidate.tree)), [{ a: 1 }, [2, 3]]);
 });
 
 test("filters empty object and array candidates", () => {
   const candidates = parseJsonCandidates('before {} then [] then {"kept":true} after');
-  assert.deepEqual(candidates.map((candidate) => candidate.value), [{ kept: true }]);
+  assert.deepEqual(candidates.map((candidate) => jsonTreeToValue(candidate.tree)), [{ kept: true }]);
 });
 
 test("does not treat falsy primitive JSON values as empty", () => {
-  assert.deepEqual(parseJsonCandidates("null")[0].value, null);
-  assert.deepEqual(parseJsonCandidates("false")[0].value, false);
-  assert.deepEqual(parseJsonCandidates("0")[0].value, 0);
-  assert.deepEqual(parseJsonCandidates('""')[0].value, "");
+  assert.deepEqual(jsonTreeToValue(parseJsonCandidates("null")[0].tree), null);
+  assert.deepEqual(jsonTreeToValue(parseJsonCandidates("false")[0].tree), false);
+  assert.deepEqual(jsonTreeToValue(parseJsonCandidates("0")[0].tree), 0);
+  assert.deepEqual(jsonTreeToValue(parseJsonCandidates('""')[0].tree), "");
 });
 
 test("returns no candidates when every JSON container is empty", () => {
@@ -156,17 +155,18 @@ test("filters an empty complete JSONC document without scanning its comments", (
 
 test("ignores invalid outer text while finding a valid nested candidate", () => {
   const candidates = parseJsonCandidates('broken { nope: [1,2] } end');
-  assert.deepEqual(candidates.map((candidate) => candidate.value), [[1, 2]]);
+  assert.deepEqual(candidates.map((candidate) => jsonTreeToValue(candidate.tree)), [[1, 2]]);
 });
 
 test("strict extraction can reject structurally damaged JSON", () => {
   assert.deepEqual(parseJsonCandidates('prefix {"a": 1 suffix', { allowPartial: false }), []);
 });
 
-test("rejects excessive unmatched nesting without scanning the full input", { timeout: 5_000 }, () => {
+test("rejects a flood of unmatched openers in linear time", { timeout: 5_000 }, () => {
   const input = "{".repeat(2_000_000);
   const started = performance.now();
-  assert.throws(() => parseJsonCandidates(input), JsonNestingTooDeepError);
+  // Unmatched openers are not nesting; the scan fails on its span budget instead.
+  assert.throws(() => parseJsonCandidates(input), JsonContainerScanLimitError);
   assert.ok(performance.now() - started < 1_500, "malformed input scan should remain linear");
 });
 
@@ -197,21 +197,61 @@ test("limits value nodes before building a large syntax tree", { timeout: 5_000 
   assert.throws(() => parseJsonCandidates(rejected), JsonValueNodeLimitError);
 });
 
-test("applies the value-node limit across all returned candidates", { timeout: 5_000 }, () => {
+test("accepts ordinary multi-megabyte record arrays under the default limit", { timeout: 5_000 }, () => {
+  const records = Array.from({ length: 20_000 }, (_, id) => ({ id, name: `n${id}`, ok: true, tags: ["a"], x: null }));
+  const [candidate] = parseJsonCandidates(JSON.stringify(records));
+  assert.equal(candidate.tree.children?.length, 20_000);
+});
+
+test("applies a configured value-node limit across all returned candidates", { timeout: 5_000 }, () => {
+  const options = { maxValueNodes: 100_000 };
   const fiftyThousandNodes = `[${"0,".repeat(49_998)}0]`;
   assert.equal(
-    parseJsonCandidates(`${fiftyThousandNodes} ${fiftyThousandNodes}`).reduce(
+    parseJsonCandidates(`${fiftyThousandNodes} ${fiftyThousandNodes}`, options).reduce(
       (total, candidate) => total + candidate.nodeCount,
       0,
     ),
-    MAX_JSON_VALUE_NODES,
+    options.maxValueNodes,
   );
 
   const fiftyThousandAndOneNodes = `[${"0,".repeat(49_999)}0]`;
   assert.throws(
-    () => parseJsonCandidates(`${fiftyThousandNodes} ${fiftyThousandAndOneNodes}`),
-    JsonValueNodeLimitError,
+    () => parseJsonCandidates(`${fiftyThousandNodes} ${fiftyThousandAndOneNodes}`, options),
+    (error: unknown) => error instanceof JsonValueNodeLimitError && error.maxNodes === options.maxValueNodes,
   );
+});
+
+test("unmatched openers in surrounding text are not mistaken for deep nesting", () => {
+  assert.deepEqual(
+    parseJsonCandidates("note [".repeat(MAX_JSON_NESTING + 100) + ' {"a":1}').map((candidate) => jsonTreeToValue(candidate.tree)),
+    [{ a: 1 }],
+  );
+  const truncated = Array.from({ length: MAX_JSON_NESTING + 10 }, (_, i) => `ERR {"i":${i},`).join("\n");
+  const candidates = parseJsonCandidates(`${truncated}\nOK {"good":true}`);
+  assert.equal(candidates.length, MAX_JSON_NESTING + 11);
+  assert.deepEqual(jsonTreeToValue(candidates.at(-1)!.tree), { good: true });
+});
+
+test("still rejects a deep complete value surrounded by log text", () => {
+  const deep = "[".repeat(MAX_JSON_NESTING + 1) + "0" + "]".repeat(MAX_JSON_NESTING + 1);
+  assert.throws(() => parseJsonCandidates(`log: ${deep} end`), JsonNestingTooDeepError);
+});
+
+test("recovers each record in a run of truncated log records", () => {
+  const input = Array.from({ length: 5 }, (_, i) => `ERR {"i":${i},`).join("\n") + '\nOK {"good":true}';
+  const candidates = parseJsonCandidates(input);
+  assert.deepEqual(
+    candidates.map((candidate) => jsonTreeToValue(candidate.tree)),
+    [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }, { i: 4 }, { good: true }],
+  );
+  assert.deepEqual(candidates.map((candidate) => candidate.recovery !== undefined), [true, true, true, true, true, false]);
+});
+
+test("pretty-printed truncated JSON is recovered as one value", () => {
+  const input = 'payload: {\n  "items": [\n    {"a": 1},\n    {"b": 2}\n  ],\n  "next": {\n    "c": 3,';
+  const candidates = parseJsonCandidates(input);
+  assert.equal(candidates.length, 1);
+  assert.deepEqual(jsonTreeToValue(candidates[0].tree), { items: [{ a: 1 }, { b: 2 }], next: { c: 3 } });
 });
 
 test("limits potential container spans in surrounding text", { timeout: 5_000 }, () => {
@@ -229,37 +269,32 @@ test("limits extracted candidates before building an oversized picker", { timeou
 
 test("recovers a valid nested candidate after the malformed-parse budget is reached", () => {
   const input = "{".repeat(100) + "[1,2]" + "}".repeat(100);
-  assert.deepEqual(parseJsonCandidates(input).map((candidate) => candidate.value), [[1, 2]]);
+  assert.deepEqual(parseJsonCandidates(input).map((candidate) => jsonTreeToValue(candidate.tree)), [[1, 2]]);
 });
 
 test("unwraps an escaped nested JSON string", () => {
   const parent = JSON.parse('{"payload":"{\\"user\\":{\\"id\\":7}}"}') as { payload: string };
   const candidates = parseNestedJsonCandidates(parent.payload);
   assert.equal(candidates.length, 1);
-  assert.deepEqual(candidates[0].value, { user: { id: 7 } });
+  assert.deepEqual(jsonTreeToValue(candidates[0].tree), { user: { id: 7 } });
 });
 
 test("unwraps a JSON string encoded twice", () => {
   const twiceEncoded = JSON.stringify(JSON.stringify({ ok: true }));
   const candidates = parseNestedJsonCandidates(twiceEncoded);
   assert.equal(candidates.length, 1);
-  assert.deepEqual(candidates[0].value, { ok: true });
+  assert.deepEqual(jsonTreeToValue(candidates[0].tree), { ok: true });
   assert.equal(candidates[0].unwrapDepth, 1);
 });
 
 test("extracts JSON from a nested string with surrounding text", () => {
   const candidates = parseNestedJsonCandidates('server said: {"status":"ok"}; done');
-  assert.deepEqual(candidates[0].value, { status: "ok" });
+  assert.deepEqual(jsonTreeToValue(candidates[0].tree), { status: "ok" });
 });
 
 test("unwraps JSONC from a nested string", () => {
   const candidates = parseNestedJsonCandidates('{ /* nested */ "ok": true, }');
-  assert.deepEqual(candidates[0].value, { ok: true });
-});
-
-test("encodes a decoded string as a complete escaped JSON literal", () => {
-  const decoded = 'line 1\nline "2" \\ end\t';
-  assert.equal(encodeJsonStringLiteral(decoded), '"line 1\\nline \\"2\\" \\\\ end\\t"');
+  assert.deepEqual(jsonTreeToValue(candidates[0].tree), { ok: true });
 });
 
 test("enforces the 100 MB UTF-8 size limit", () => {
@@ -270,7 +305,7 @@ test("enforces the 100 MB UTF-8 size limit", () => {
 test("recovers valid fields before and after an invalid value without guessing it", () => {
   const input = 'INFO {"before":1,"broken":undefined,"after":false} elapsed=2';
   const [candidate] = parseJsonCandidates(input);
-  assert.deepEqual(candidate.value, { before: 1, after: false });
+  assert.deepEqual(jsonTreeToValue(candidate.tree), { before: 1, after: false });
   assert.ok(candidate.recovery);
   assert.equal(candidate.raw, input.slice(candidate.start, candidate.end));
   assert.ok(candidate.recovery.issues.some((issue) => issue.code === "InvalidSymbol"));
@@ -289,23 +324,23 @@ test("recovers missing separators and retains lossless tokens and duplicate keys
 test("recovers truncated containers and omits incomplete properties and string tokens", () => {
   for (const input of ['{"ok":1,"missing":', '{"ok":1,"missing":"unfinished']) {
     const [candidate] = parseJsonCandidates(input);
-    assert.deepEqual(candidate.value, { ok: 1 });
+    assert.deepEqual(jsonTreeToValue(candidate.tree), { ok: 1 });
     assert.ok(candidate.recovery);
     assert.equal(candidate.raw, input);
   }
   const [nested] = parseJsonCandidates('{"ok":1,"nested":{"flag":true}');
-  assert.deepEqual(nested.value, { ok: 1, nested: { flag: true } });
+  assert.deepEqual(jsonTreeToValue(nested.tree), { ok: 1, nested: { flag: true } });
   assert.ok(nested.recovery);
 });
 
 test("does not turn malformed primitive tokens or keys into invented values", () => {
   for (const bad of ['01', '-01', '12abc', '1.2.3', '1e+2x', '1e', '12中文', '12@x', '12/xx', '12%', '12\u00a0x', 'truex', 'nullx', '"\\q"', '"\\u12"']) {
     const [candidate] = parseJsonCandidates(`{"bad":${bad},"ok":2}`);
-    assert.deepEqual(candidate.value, { ok: 2 });
+    assert.deepEqual(jsonTreeToValue(candidate.tree), { ok: 2 });
     assert.ok(candidate.recovery);
   }
   const [candidate] = parseJsonCandidates('{"bad\\q":1,"ok":2}');
-  assert.deepEqual(candidate.value, { ok: 2 });
+  assert.deepEqual(jsonTreeToValue(candidate.tree), { ok: 2 });
   assert.deepEqual(parseJsonCandidates('{"bad":oops}'), []);
   assert.deepEqual(parseJsonCandidates("{'bad':1}"), []);
 });
@@ -314,13 +349,13 @@ test("retains useful outer fields instead of exposing only a valid inner fragmen
   const input = '{"id":7,"nested":{"ok":true},"bad":oops}';
   const [candidate] = parseJsonCandidates(input);
   assert.equal(candidate.raw, input);
-  assert.deepEqual(candidate.value, { id: 7, nested: { ok: true } });
+  assert.deepEqual(jsonTreeToValue(candidate.tree), { id: 7, nested: { ok: true } });
   assert.ok(candidate.recovery);
 });
 
 test("a broken key/value gap does not attach an unrelated later container", () => {
   const candidates = parseJsonCandidates('{"id":1,"broken":oops {"next":2}}');
-  assert.deepEqual(candidates.map((candidate) => candidate.value), [{ id: 1 }, { next: 2 }]);
+  assert.deepEqual(candidates.map((candidate) => jsonTreeToValue(candidate.tree)), [{ id: 1 }, { next: 2 }]);
   assert.ok(candidates[0].recovery);
   assert.equal(candidates[1].recovery, undefined);
   assert.ok(candidates[0].end <= candidates[1].start);
@@ -328,7 +363,7 @@ test("a broken key/value gap does not attach an unrelated later container", () =
 
 test("a truncated record does not swallow the next valid log record", () => {
   const candidates = parseJsonCandidates('{"id":1\nINFO {"next":2}');
-  assert.deepEqual(candidates.map((candidate) => candidate.value), [{ id: 1 }, { next: 2 }]);
+  assert.deepEqual(candidates.map((candidate) => jsonTreeToValue(candidate.tree)), [{ id: 1 }, { next: 2 }]);
   assert.ok(candidates[0].recovery);
   assert.equal(candidates[1].recovery, undefined);
 });
@@ -336,7 +371,7 @@ test("a truncated record does not swallow the next valid log record", () => {
 test("extracts adjacent and mixed complete/recovered JSON values from one line", () => {
   const input = 'prefix {"first":1}{"bad":oops,"second":2} [3,4] tail {"last":5}';
   const candidates = parseJsonCandidates(input);
-  assert.deepEqual(candidates.map((candidate) => candidate.value), [
+  assert.deepEqual(candidates.map((candidate) => jsonTreeToValue(candidate.tree)), [
     { first: 1 }, { second: 2 }, [3, 4], { last: 5 },
   ]);
   assert.deepEqual(candidates.map((candidate) => Boolean(candidate.recovery)), [false, true, false, false]);
@@ -345,13 +380,13 @@ test("extracts adjacent and mixed complete/recovered JSON values from one line",
 
 test("recovery does not extract damaged JSON from balanced prefix strings or comments", () => {
   for (const prefix of ['/* {"fake":1,"bad":oops} */', '// {"fake":1,"bad":oops}\n']) {
-    assert.deepEqual(parseJsonCandidates(`${prefix}{"real":2}`).map((candidate) => candidate.value), [{ real: 2 }]);
+    assert.deepEqual(parseJsonCandidates(`${prefix}{"real":2}`).map((candidate) => jsonTreeToValue(candidate.tree)), [{ real: 2 }]);
   }
 });
 
 test("nested decoded JSON also supports marked partial recovery", () => {
   const [candidate] = parseNestedJsonCandidates(JSON.stringify('{"id":7,"bad":oops}'));
-  assert.deepEqual(candidate.value, { id: 7 });
+  assert.deepEqual(jsonTreeToValue(candidate.tree), { id: 7 });
   assert.equal(candidate.unwrapDepth, 1);
   assert.ok(candidate.recovery);
 });
@@ -359,7 +394,7 @@ test("nested decoded JSON also supports marked partial recovery", () => {
 test("recovery diagnostics are bounded for many damaged fields", { timeout: 5_000 }, () => {
   const input = '{"ok":true,' + Array.from({ length: 3_000 }, (_, index) => `"bad${index}":oops`).join(',') + '}';
   const [candidate] = parseJsonCandidates(input);
-  assert.deepEqual(candidate.value, { ok: true });
+  assert.deepEqual(jsonTreeToValue(candidate.tree), { ok: true });
   assert.equal(candidate.nodeCount, 2);
   assert.ok(candidate.recovery && candidate.recovery.errorCount > 3_000);
   assert.equal(candidate.recovery.issues.length, 20);
@@ -367,14 +402,14 @@ test("recovery diagnostics are bounded for many damaged fields", { timeout: 5_00
 
 test("does not reinterpret adjacent invalid numeric tokens as separate array values", () => {
   const [candidate] = parseJsonCandidates('[01,2,1.2.3,4]');
-  assert.deepEqual(candidate.value, [2, 4]);
+  assert.deepEqual(jsonTreeToValue(candidate.tree), [2, 4]);
   assert.ok(candidate.recovery);
   assert.deepEqual(parseJsonCandidates('[01]'), []);
 });
 
 test("partial numeric recovery retains JSONC comments and whitespace-separated values", () => {
   const [candidate] = parseJsonCandidates('[/* first */1/* second */,2 3,"bad":oops]');
-  assert.deepEqual(candidate.value, [1, 2, 3, "bad"]);
+  assert.deepEqual(jsonTreeToValue(candidate.tree), [1, 2, 3, "bad"]);
   assert.ok(candidate.recovery);
 });
 

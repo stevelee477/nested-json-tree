@@ -7,9 +7,7 @@ import {
   assertTransferTextSize,
   buildJsonTree,
   buildJsonTreeContextIndex,
-  countJsonTreeNodes,
   createJsonTreeWebviewModel,
-  findJsonTreeNode,
   isValidJsonTreeNodeId,
   jsonTreeToValue,
   materializeJsonTreePath,
@@ -50,14 +48,16 @@ test("formats strict JSON without losing comments, trailing-comma values, escape
   assert.equal(stringifyJsonTree(duplicateRoot, 0), '{"same":1,"same":2}');
 });
 
-test("finds node IDs and counts with an early-exit ceiling", () => {
+test("node index resolves every node ID and rejects unknown ones", () => {
   const root = parseLosslessly('{"items":[1,2,3]}');
   const second = root.children?.[0].value.children?.[1].value;
   assert.ok(second);
-  assert.equal(findJsonTreeNode(root, second.id), second);
-  assert.equal(findJsonTreeNode(root, 10_000), undefined);
-  assert.equal(countJsonTreeNodes(root), 5);
-  assert.equal(countJsonTreeNodes(root, 2), 3);
+  const index = buildJsonTreeContextIndex(root);
+  assert.equal(index.get(second.id)?.node, second);
+  assert.deepEqual(materializeJsonTreePath(index.get(second.id)!), ["items", 1]);
+  assert.equal(index.get(10_000), undefined);
+  assert.equal(index.get(-1), undefined);
+  assert.equal(index.get(1.5), undefined);
 });
 
 test("indexes trusted node contexts and materializes object/array paths", () => {

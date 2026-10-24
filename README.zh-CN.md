@@ -71,7 +71,7 @@ Tree View 会保留源文件地址和当前行号。可以用 **Prev**、**Next*
 也可以使用命令行：
 
 ```sh
-code --install-extension nested-json-tree-0.5.0.vsix
+code --install-extension nested-json-tree-<version>.vsix
 ```
 
 ## 命令
@@ -87,7 +87,10 @@ code --install-extension nested-json-tree-0.5.0.vsix
 - `Cmd+F` / `Ctrl+F`：聚焦搜索框。
 - `Enter` / `Shift+Enter`：跳转下一个或上一个结果。
 - `Esc`：清空搜索并恢复搜索前的展开状态。
-- 右键节点：复制值、字段名、JSONPath 或 jq 路径。
+- 显示搜索结果时仍可手动展开或收起分支，**Collapse all** 也可以使用。
+- 右键节点（或按 `Shift+F10`）：复制值、字段名、JSONPath 或 jq 路径。
+- 键盘操作：`↑`/`↓` 在行之间移动，`→`/`←` 展开/收起或移动到子节点/父节点，`Home`/`End` 跳到首行/末行，`Enter`/`Space` 切换容器或打开操作菜单。
+- 切回被隐藏的 Tree View 标签页时，会恢复展开状态、搜索词和滚动位置。
 - 字符串节点可以打开已解析 JSON，也可以将反转义后的内容原样打开为纯文本。
 
 jq 路径示例：
@@ -101,11 +104,12 @@ jq 路径示例：
 | 设置项 | 默认值 | 说明 |
 | --- | ---: | --- |
 | `nestedJsonTree.autoExpandMaxNodes` | `200` | 节点数不超过此值时自动完全展开；设为 `0` 时禁用后代自动展开，超过 10,000 个节点的根节点仍保持折叠。 |
+| `nestedJsonTree.maxValueNodes` | `500000` | 单个文档或树最多解析的 JSON 值节点数（10,000–5,000,000）。每百万节点约占用 250 MB Extension Host 内存。 |
 
 ## 解析边界
 
 - 输入文件最大 100 MB。
-- 安全上限：最多 1,024 层嵌套、合计 100,000 个值节点、5,000 个提取候选和 50,000 个潜在容器片段。
+- 安全上限：最多 1,024 层嵌套、合计 500,000 个值节点（可配置）、5,000 个提取候选和 50,000 个潜在容器片段。日志文本中未闭合的括号不计入嵌套层数。
 - 支持常见日志前后缀；如果无关内容同时混有多组未闭合引号或注释，提取只能尽力而为。
 - 支持 JSONC 注释和尾逗号；打开到编辑器时会输出严格 JSON。
 - 保留数字和字符串 token、字段名转义、字段顺序与重复字段。
@@ -124,7 +128,7 @@ npm run test:integration
 npm run package
 ```
 
-在 VS Code 中按 `F5` 启动 Extension Development Host。截图使用的虚构数据位于 [`examples/`](examples/)。
+`npm run watch` 会在文件变化时重新构建扩展和 Webview bundle。在 VS Code 中按 `F5` 启动 Extension Development Host。截图使用的虚构数据位于 [`examples/`](examples/)。
 
 ## 参与贡献
 
