@@ -25,6 +25,11 @@ test("prefixes root array indexes with the jq identity selector", () => {
   assert.equal(formatJqPath([0, "name"]), ".[0].name");
 });
 
+test("keeps jq keyword-named fields as plain field access", () => {
+  // jq lexes `.if` as one FIELD token (since 1.5), so keywords need no quoting.
+  assert.equal(formatJqPath(["if", "end", "reduce"]), ".if.end.reduce");
+});
+
 test("quotes keys that are not simple jq identifiers", () => {
   assert.equal(formatJqPath(["display-name"]), '.["display-name"]');
   assert.equal(
