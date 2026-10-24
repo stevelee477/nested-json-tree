@@ -136,7 +136,7 @@ export function parseJsonCandidates(text: string, options: JsonParseOptions = {}
   // The recovery view ignores that prefix syntax, then filters candidates
   // wholly contained in balanced strict-view strings/comments.
   let recoveryCandidates: JsonCandidate[];
-  let recoverySpans: ContainerSpan[] = [];
+  let recoverySpans: ContainerSpan[];
   try {
     recoverySpans = scanContainerSpans(text, false).spans;
     recoveryCandidates = parseContainerSpans(
