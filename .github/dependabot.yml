@@ -12,9 +12,9 @@ updates:
       # Must track engines.vscode, not the latest VS Code API.
       - dependency-name: "@types/vscode"
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
-      # Should match the Node.js runtime bundled with the minimum VS Code version.
+      # Must match Node.js 20.9 bundled with the minimum VS Code version (1.90).
       - dependency-name: "@types/node"
-        update-types: ["version-update:semver-major"]
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
       # Major TypeScript releases must wait for typescript-eslint support.
       - dependency-name: "typescript"
         update-types: ["version-update:semver-major"]
