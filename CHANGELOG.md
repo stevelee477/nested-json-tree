@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
 
 - Raised the default value-node limit from 100,000 to 500,000 and made it configurable with `nestedJsonTree.maxValueNodes`; ordinary multi-megabyte record arrays now open.
 - Stopped counting unmatched brackets in surrounding log text as nesting, so logs with many truncated records no longer fail with a misleading "nesting too deep" error. Deep complete values are still rejected.
