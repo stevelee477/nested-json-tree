@@ -1,7 +1,7 @@
 {
   "name": "nested-json-tree",
   "displayName": "Nested JSON Tree",
-  "description": "Open JSON, JSONL lines, and escaped JSON strings as recursive tree views.",
+  "description": "%extension.description%",
   "version": "0.7.0",
   "publisher": "local-dev",
   "icon": "assets/icon.png",
@@ -38,9 +38,12 @@
   ],
   "activationEvents": [
     "onCommand:nestedJsonTree.openDocument",
-    "onCommand:nestedJsonTree.openCurrentLine"
+    "onCommand:nestedJsonTree.openCurrentLine",
+    "onCommand:nestedJsonTree.openSelection",
+    "onCommand:nestedJsonTree.openClipboard"
   ],
   "main": "./out/extension.js",
+  "l10n": "./l10n",
   "contributes": {
     "configuration": {
       "title": "Nested JSON Tree",
@@ -50,27 +53,41 @@
           "default": 200,
           "minimum": 0,
           "maximum": 10000,
-          "markdownDescription": "Automatically expand every object and array when the JSON contains at most this many value nodes. Set to `0` to disable automatic descendant expansion. Roots above the 10,000-node materialization limit remain collapsed."
+          "markdownDescription": "%config.autoExpandMaxNodes%"
         },
         "nestedJsonTree.maxValueNodes": {
           "type": "integer",
           "default": 500000,
           "minimum": 10000,
           "maximum": 5000000,
-          "markdownDescription": "Maximum number of JSON value nodes (objects, arrays, and primitives) parsed for one tree or document. Larger values use more Extension Host memory — roughly 250 MB per million nodes."
+          "markdownDescription": "%config.maxValueNodes%"
         }
       }
     },
     "commands": [
       {
         "command": "nestedJsonTree.openDocument",
-        "title": "Nested JSON Tree: Open Document as Tree",
+        "title": "%command.openDocument.title%",
+        "category": "Nested JSON Tree",
         "icon": "$(json)"
       },
       {
         "command": "nestedJsonTree.openCurrentLine",
-        "title": "Nested JSON Tree: Open Current Line as Tree",
+        "title": "%command.openCurrentLine.title%",
+        "category": "Nested JSON Tree",
         "icon": "$(list-tree)"
+      },
+      {
+        "command": "nestedJsonTree.openSelection",
+        "title": "%command.openSelection.title%",
+        "category": "Nested JSON Tree",
+        "icon": "$(selection)"
+      },
+      {
+        "command": "nestedJsonTree.openClipboard",
+        "title": "%command.openClipboard.title%",
+        "category": "Nested JSON Tree",
+        "icon": "$(clippy)"
       }
     ],
     "menus": {
@@ -88,6 +105,11 @@
       ],
       "editor/context": [
         {
+          "command": "nestedJsonTree.openSelection",
+          "when": "editorHasSelection",
+          "group": "navigation@89"
+        },
+        {
           "command": "nestedJsonTree.openDocument",
           "when": "editorTextFocus && (editorLangId == json || editorLangId == jsonc || resourceExtname == .json || resourceExtname == .jsonc || resourceExtname == .jsonl || resourceExtname == .ndjson)",
           "group": "navigation@90"
@@ -104,6 +126,12 @@
         },
         {
           "command": "nestedJsonTree.openCurrentLine"
+        },
+        {
+          "command": "nestedJsonTree.openSelection"
+        },
+        {
+          "command": "nestedJsonTree.openClipboard"
         }
       ]
     }

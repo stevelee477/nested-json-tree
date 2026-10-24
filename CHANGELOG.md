@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Added **Open Selection as Tree** (editor context menu whenever text is selected) and **Open Clipboard as Tree**.
+- Added inline decoding: strings that contain a JSON object or array expand in place, including double-encoded and repeatedly nested strings. Search covers decoded content, and jq paths cross it with `fromjson`.
+- Linked document and selection trees to their source: **Reveal in source** selects a node's exact range, **Sync with editor** highlights the node under the cursor, and document trees refresh automatically after edits while keeping expansion, inline decoding, search, and scroll position. JSONL **Follow cursor** also highlights the node under the cursor.
+- Added value hints for Unix timestamps (seconds and milliseconds), color swatches, string lengths, and `Cmd`/`Ctrl`+click links.
+- Localized the UI, commands, and settings into Simplified Chinese.
+
 ## 0.7.0
 
 - Raised the default value-node limit from 100,000 to 500,000 and made it configurable with `nestedJsonTree.maxValueNodes`; ordinary multi-megabyte record arrays now open.

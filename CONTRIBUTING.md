@@ -12,6 +12,19 @@ npm run test:integration
 
 Run `npm run watch` to rebuild the extension and Webview bundles on change, then press `F5` in VS Code to launch an Extension Development Host. Use the synthetic files in `examples/` for manual testing.
 
+### Localization
+
+User-visible strings go through `vscode.l10n.t(...)` on the Extension Host and `t(...)` in the Webview; manifest strings live in `package.nls*.json`. Add every new string to `l10n/bundle.l10n.zh-cn.json` — `npm test` fails on missing, stale, or placeholder-mismatched translations, and `node scripts/l10n-keys.cjs` lists every key.
+
+To run the integration tests in Chinese, install the language pack into a dedicated extensions folder once (the path below is for macOS on Apple silicon; use the downloaded VS Code under `.vscode-test/` on other platforms), then pass the locale:
+
+```sh
+".vscode-test/vscode-darwin-arm64-1.90.0/Visual Studio Code.app/Contents/Resources/app/bin/code" \
+  --user-data-dir "$PWD/.vscode-test/user-data" --extensions-dir /tmp/zh-ext \
+  --install-extension MS-CEINTL.vscode-language-pack-zh-hans
+VSCODE_TEST_LOCALE=zh-cn VSCODE_TEST_EXTENSIONS_DIR=/tmp/zh-ext npm run test:integration
+```
+
 ## Pull requests
 
 - Keep each change focused.

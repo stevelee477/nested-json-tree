@@ -99,6 +99,19 @@ export function advanceJsonTreeSearch(
       });
       continue;
     }
+    // JSON decoded from a string is searched as that string's only child.
+    if (frame.nextChildIndex === children.length && frame.node.decoded !== undefined) {
+      frame.nextChildIndex += 1;
+      state.stack.push({
+        node: frame.node.decoded.root,
+        key: undefined,
+        rawKey: undefined,
+        parent: frame,
+        entered: false,
+        nextChildIndex: 0,
+      });
+      continue;
+    }
     state.stack.pop();
   }
 

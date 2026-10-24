@@ -1,15 +1,53 @@
 import {
   JsonTreeOutputTooLargeError,
+  type JsonTreePathSegment,
   MAX_TRANSFER_OUTPUT_CHARACTERS,
 } from "./jsonTree";
+
+type PlainPath = Array<string | number>;
 
 export const MAX_DISPLAY_PATH_CHARACTERS = 10_000;
 
 const PATH_OMISSION_MARKER = "…[path shortened]…";
 const KEY_OMISSION_MARKER = "…[key shortened]…";
 
-/** Formats a node path as a jq filter that can be pasted after `jq`. */
-export function formatJqPath(path: Array<string | number>): string {
+/**
+ * Splits a path at decoded-string boundaries. `passes[i]` is how many times the
+ * string ending `groups[i]` is decoded before `groups[i + 1]` applies.
+ */
+export function splitDecodedPath(path: JsonTreePathSegment[]): { groups: PlainPath[]; passes: number[] } {
+  const groups: PlainPath[] = [[]];
+  const passes: number[] = [];
+  for (const segment of path) {
+    if (typeof segment === "object") {
+      passes.push(segment.decode);
+      groups.push([]);
+    } else {
+      groups[groups.length - 1].push(segment);
+    }
+  }
+  return { groups, passes };
+}
+
+export function isDecodedPath(path: JsonTreePathSegment[]): boolean {
+  return path.some((segment) => typeof segment === "object");
+}
+
+/**
+ * Formats a node path as a jq filter that can be pasted after `jq`. Decoded
+ * string boundaries become `| fromjson`, once per encoding layer.
+ */
+export function formatJqPath(path: JsonTreePathSegment[]): string {
+  const { groups, passes } = splitDecodedPath(path);
+  let filter = formatJqGroup(groups[0]);
+  for (let index = 1; index < groups.length; index += 1) {
+    filter += " | fromjson".repeat(passes[index - 1]);
+    if (groups[index].length > 0) filter += ` | ${formatJqGroup(groups[index])}`;
+  }
+  return filter;
+}
+
+function formatJqGroup(path: PlainPath): string {
   if (path.length === 0) {
     return ".";
   }
@@ -28,24 +66,38 @@ export function formatJqPath(path: Array<string | number>): string {
 
 /** Measures before formatting so an oversized escaped key never creates a huge temporary string. */
 export function formatJqPathForTransfer(
-  path: Array<string | number>,
+  path: JsonTreePathSegment[],
   outputLimit = MAX_TRANSFER_OUTPUT_CHARACTERS,
 ): string {
-  assertPathOutputWithinLimit(path, "jq", outputLimit);
+  const limit = Number.isFinite(outputLimit) ? Math.max(0, Math.trunc(outputLimit)) : 0;
+  const { groups, passes } = splitDecodedPath(path);
+  let length = measurePathGroup(groups[0], "jq", limit, 0);
+  for (let index = 1; index < groups.length; index += 1) {
+    length += " | fromjson".length * passes[index - 1];
+    if (groups[index].length > 0) length = measurePathGroup(groups[index], "jq", limit, length + 3);
+    if (length > limit) throw new JsonTreeOutputTooLargeError(limit);
+  }
   return formatJqPath(path);
 }
 
-/** Formats a complete JSONPath for trusted Host-side copy operations. */
-export function formatJsonPath(path: Array<string | number>): string {
-  return `$${path.map(formatJsonPathSegment).join("")}`;
+/**
+ * Formats a complete JSONPath for trusted Host-side copy operations. JSONPath
+ * cannot cross a decoded string, so a decoded path is relative to the
+ * innermost decoded value.
+ */
+export function formatJsonPath(path: JsonTreePathSegment[]): string {
+  const { groups } = splitDecodedPath(path);
+  return `$${groups[groups.length - 1].map(formatJsonPathSegment).join("")}`;
 }
 
 /** Measures before formatting so an oversized escaped key never creates a huge temporary string. */
 export function formatJsonPathForTransfer(
-  path: Array<string | number>,
+  path: JsonTreePathSegment[],
   outputLimit = MAX_TRANSFER_OUTPUT_CHARACTERS,
 ): string {
-  assertPathOutputWithinLimit(path, "jsonpath", outputLimit);
+  const limit = Number.isFinite(outputLimit) ? Math.max(0, Math.trunc(outputLimit)) : 0;
+  const { groups } = splitDecodedPath(path);
+  measurePathGroup(groups[groups.length - 1], "jsonpath", limit, 0);
   return formatJsonPath(path);
 }
 
@@ -54,8 +106,22 @@ export function formatJsonPathForTransfer(
  * Quick Picks, and Webview labels. It never stringifies one unbounded key.
  */
 export function formatJsonPathForDisplay(
-  path: Array<string | number>,
+  path: JsonTreePathSegment[],
   maxCharacters = MAX_DISPLAY_PATH_CHARACTERS,
+): string {
+  const { groups } = splitDecodedPath(path);
+  if (groups.length === 1) return formatPlainPathForDisplay(groups[0], maxCharacters);
+  // Each decoded value starts a new `$`; the boundary reads as "⟩".
+  const limit = normalizeDisplayLimit(maxCharacters);
+  return boundDisplayText(
+    groups.map((group) => formatPlainPathForDisplay(group, limit)).join(" ⟩ "),
+    limit,
+  );
+}
+
+function formatPlainPathForDisplay(
+  path: PlainPath,
+  maxCharacters: number,
 ): string {
   const limit = normalizeDisplayLimit(maxCharacters);
   if (limit <= 1) return "$".slice(0, limit);
@@ -103,15 +169,16 @@ function formatJsonPathSegment(segment: string | number): string {
     : `[${JSON.stringify(segment)}]`;
 }
 
-function assertPathOutputWithinLimit(
-  path: Array<string | number>,
+/** Returns `used` plus the exact formatted length of one plain path group, or throws past the limit. */
+function measurePathGroup(
+  path: PlainPath,
   syntax: "jq" | "jsonpath",
-  outputLimit: number,
-): void {
-  const limit = Number.isFinite(outputLimit) ? Math.max(0, Math.trunc(outputLimit)) : 0;
-  let length = syntax === "jsonpath" || path.length === 0 ? 1 : 0;
+  limit: number,
+  used: number,
+): number {
+  let length = used + (syntax === "jsonpath" || path.length === 0 ? 1 : 0);
   if (length > limit) throw new JsonTreeOutputTooLargeError(limit);
-  if (path.length === 0) return;
+  if (path.length === 0) return length;
 
   for (let index = 0; index < path.length; index += 1) {
     const segment = path[index];
@@ -137,6 +204,7 @@ function assertPathOutputWithinLimit(
     length += segmentLength;
     if (length > limit) throw new JsonTreeOutputTooLargeError(limit);
   }
+  return length;
 }
 
 /** Exact modern JSON.stringify string-literal length, with an early-exit ceiling. */

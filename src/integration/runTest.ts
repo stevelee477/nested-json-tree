@@ -11,7 +11,14 @@ async function main(): Promise<void> {
     extensionDevelopmentPath,
     extensionTestsPath,
     ...(vscodeExecutablePath === undefined ? { version } : { vscodeExecutablePath }),
-    launchArgs: ["--disable-extensions"],
+    launchArgs: [
+      // A locale needs its language pack, so a locale run uses a dedicated
+      // extensions folder that contains only that pack.
+      ...(process.env.VSCODE_TEST_EXTENSIONS_DIR === undefined
+        ? ["--disable-extensions"]
+        : ["--extensions-dir", process.env.VSCODE_TEST_EXTENSIONS_DIR]),
+      ...(process.env.VSCODE_TEST_LOCALE === undefined ? [] : [`--locale=${process.env.VSCODE_TEST_LOCALE}`]),
+    ],
   });
 
   if (exitCode !== 0) {

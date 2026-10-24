@@ -2,6 +2,7 @@
 export function createWebviewHarness(
   script: string,
   api: { getState?: () => unknown; setState?: (state: unknown) => void } = {},
+  l10nBundle?: Record<string, string>,
 ) {
   class FakeClassList {
     private readonly names = new Set<string>();
@@ -38,6 +39,7 @@ export function createWebviewHarness(
     disabled = false;
     tabIndex = 0;
     scrollTop = 0;
+    readonly style: Record<string, string> = {};
 
     constructor(readonly fragment = false) {}
 
@@ -63,6 +65,10 @@ export function createWebviewHarness(
 
     setAttribute(name: string, value: string): void {
       this.attributes.set(name, value);
+    }
+
+    removeAttribute(name: string): void {
+      this.attributes.delete(name);
     }
 
     querySelectorAll(selector: string): FakeElement[] {
@@ -111,8 +117,18 @@ export function createWebviewHarness(
     "jsonl-status",
     "recovery-warning",
     "tree-operation-status",
+    "source-bar",
+    "sync-cursor",
+    "refresh-source",
+    "source-status",
   ];
   const elements = new Map(elementIds.map((id) => [id, new FakeElement()]));
+  if (l10nBundle !== undefined) {
+    const bundle = new FakeElement();
+    bundle.textContent = JSON.stringify(l10nBundle);
+    elements.set("l10n-bundle", bundle);
+  }
+  const posted: Array<Record<string, unknown>> = [];
   const windowListeners = new Map<string, Array<(event: { data: unknown }) => void>>();
   const timers: Array<() => void> = [];
   const document = {
@@ -144,7 +160,14 @@ export function createWebviewHarness(
     "performance",
     script,
   );
-  run(window, document, () => ({ postMessage: () => {}, ...api }), setTimeout, () => {}, { now: () => 0 });
+  run(
+    window,
+    document,
+    () => ({ postMessage: (message: Record<string, unknown>) => posted.push(message), ...api }),
+    setTimeout,
+    () => {},
+    { now: () => 0 },
+  );
 
   const drainTimers = (maxTurns = 10_000): number => {
     let turns = 0;
@@ -154,5 +177,8 @@ export function createWebviewHarness(
     }
     return turns;
   };
-  return { elements, windowListeners, timers, drainTimers };
+  const send = (data: unknown): void => {
+    for (const listener of windowListeners.get("message") ?? []) listener({ data });
+  };
+  return { elements, windowListeners, timers, drainTimers, posted, send };
 }

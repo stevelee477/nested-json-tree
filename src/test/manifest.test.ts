@@ -43,6 +43,13 @@ test("GitHub publication metadata is complete and uses the public author identit
   assert.equal(manifest.bugs.url, "https://github.com/stevelee477/nested-json-tree/issues");
 });
 
+test("Open Selection appears in the editor context menu whenever text is selected", () => {
+  const item = manifest.contributes.menus["editor/context"].find(
+    (candidate) => candidate.command === "nestedJsonTree.openSelection",
+  );
+  assert.equal(item?.when, "editorHasSelection");
+});
+
 test("editor context commands are limited to JSON and JSONL family files", () => {
   const contextItems = manifest.contributes.menus["editor/context"];
   const commands = ["nestedJsonTree.openDocument", "nestedJsonTree.openCurrentLine"];
@@ -57,11 +64,16 @@ test("editor context commands are limited to JSON and JSONL family files", () =>
   }
 });
 
-test("both commands remain available from the Command Palette", () => {
+test("every command remains available from the Command Palette", () => {
   const paletteItems = manifest.contributes.menus.commandPalette;
   assert.deepEqual(
     paletteItems.map((item) => item.command).sort(),
-    ["nestedJsonTree.openCurrentLine", "nestedJsonTree.openDocument"],
+    [
+      "nestedJsonTree.openClipboard",
+      "nestedJsonTree.openCurrentLine",
+      "nestedJsonTree.openDocument",
+      "nestedJsonTree.openSelection",
+    ],
   );
   assert.ok(paletteItems.every((item) => item.when === undefined));
 });

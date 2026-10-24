@@ -1,0 +1,9 @@
+{
+  "extension.description": "Open JSON, JSONL lines, selections, and escaped JSON strings as recursive tree views.",
+  "command.openDocument.title": "Open Document as Tree",
+  "command.openCurrentLine.title": "Open Current Line as Tree",
+  "command.openSelection.title": "Open Selection as Tree",
+  "command.openClipboard.title": "Open Clipboard as Tree",
+  "config.autoExpandMaxNodes": "Automatically expand every object and array when the JSON contains at most this many value nodes. Set to `0` to disable automatic descendant expansion. Roots above the 10,000-node materialization limit remain collapsed.",
+  "config.maxValueNodes": "Maximum number of JSON value nodes (objects, arrays, and primitives) parsed for one tree or document. Larger values use more Extension Host memory — roughly 250 MB per million nodes."
+}

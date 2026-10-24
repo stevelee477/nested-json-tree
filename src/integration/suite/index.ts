@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import * as vscode from "vscode";
+import type { ExtensionTestApi } from "../../extension";
+import type { JsonTreeNode } from "../../jsonTree";
+import type { PanelTestHandle } from "../../treePanel";
 
 const EXTENSION_NAME = "nested-json-tree";
 const OPEN_DOCUMENT_COMMAND = "nestedJsonTree.openDocument";
@@ -12,7 +15,7 @@ export async function run(): Promise<void> {
   );
   assert.ok(extension, `Could not find the ${EXTENSION_NAME} development extension.`);
 
-  const api = (await extension.activate()) as { readyWebviewCount(): number };
+  const api = (await extension.activate()) as ExtensionTestApi;
   assert.equal(extension.isActive, true, "The extension should be active after activation.");
 
   const commands = await vscode.commands.getCommands(true);
@@ -22,14 +25,115 @@ export async function run(): Promise<void> {
     `${OPEN_CURRENT_LINE_COMMAND} should be registered.`,
   );
 
+  verifyLocalization();
   await expectWebviewReady(api, verifyOpenDocumentCommand);
   await expectWebviewReady(api, verifyOpenCurrentLineCommand);
   await expectWebviewReady(api, verifyRecoveredDocumentCommand);
+  await verifySelectionRevealAndCursorSync(api);
+  await verifyLiveRefreshKeepsInlineDecodedJson(api);
+  await verifyOpenClipboardCommand(api);
+}
+
+/** Expected panel title in the active display language. */
+function treeTitle(name: "Untitled", line?: number): string {
+  const sourceName = vscode.l10n.t(name);
+  return line === undefined
+    ? vscode.l10n.t("JSON Tree · {0}", sourceName)
+    : vscode.l10n.t("JSON Tree · {0}:{1}", sourceName, line);
+}
+
+/** Run with VSCODE_TEST_LOCALE=zh-cn to check that the extension's bundle loads. */
+function verifyLocalization(): void {
+  const requested = process.env.VSCODE_TEST_LOCALE;
+  if (requested !== undefined) assert.equal(vscode.env.language.toLowerCase(), requested.toLowerCase());
+  if (!vscode.env.language.toLowerCase().startsWith("zh")) {
+    assert.equal(vscode.l10n.t("Open link"), "Open link");
+    return;
+  }
+  assert.equal(vscode.l10n.t("Open link"), "打开链接");
+  assert.equal(vscode.l10n.t("JSON Tree · {0}", "a.json"), "JSON 树 · a.json");
+}
+
+async function waitFor<T>(read: () => T | undefined, description: string, timeoutMs = 10_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = read();
+    if (value !== undefined && value !== false) return value;
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${description}.`);
+    await delay(50);
+  }
+}
+
+function newestPanel(api: ExtensionTestApi, title: string): PanelTestHandle | undefined {
+  return api.panels().filter((panel) => panel.title === title).at(-1);
+}
+
+function childValue(node: JsonTreeNode, key: string | number): JsonTreeNode {
+  const child = node.children?.find((candidate) => candidate.key === key);
+  assert.ok(child, `missing child ${String(key)}`);
+  return child.value;
+}
+
+async function verifySelectionRevealAndCursorSync(api: ExtensionTestApi): Promise<void> {
+  const content = 'INFO request done\nDEBUG payload={"a": {"b": 42}, "c": "x"} trailing\n';
+  const document = await vscode.workspace.openTextDocument({ language: "plaintext", content });
+  const editor = await vscode.window.showTextDocument(document, { preview: false });
+  const start = content.indexOf("{");
+  const end = content.lastIndexOf("}") + 1;
+  editor.selection = new vscode.Selection(document.positionAt(start), document.positionAt(end));
+  await vscode.commands.executeCommand("nestedJsonTree.openSelection");
+  const panel = await waitFor(() => newestPanel(api, treeTitle("Untitled", 2)), "the selection panel");
+  const b = childValue(childValue(panel.tree, "a"), "b");
+
+  await panel.runNodeAction("revealInSource", b.id);
+  const revealed = await waitFor(() => {
+    const active = vscode.window.activeTextEditor;
+    return active?.document === document && !active.selection.isEmpty ? active : undefined;
+  }, "the revealed source range");
+  assert.equal(document.getText(revealed.selection), "42");
+
+  const a = childValue(panel.tree, "a");
+  revealed.selection = new vscode.Selection(document.positionAt(content.indexOf('"a"') + 1), document.positionAt(content.indexOf('"a"') + 1));
+  await waitFor(() => newestPanel(api, treeTitle("Untitled", 2))?.lastSyncedNodeId === a.id || undefined, "cursor sync to the key's value");
+}
+
+async function verifyLiveRefreshKeepsInlineDecodedJson(api: ExtensionTestApi): Promise<void> {
+  const content = '{"payload": "{\\"items\\": [1, 2]}", "n": 1}';
+  const document = await vscode.workspace.openTextDocument({ language: "json", content });
+  const editor = await vscode.window.showTextDocument(document, { preview: false });
+  await vscode.commands.executeCommand("nestedJsonTree.openDocument");
+  const title = treeTitle("Untitled");
+  const panel = await waitFor(() => newestPanel(api, title), "the document panel");
+  const payload = childValue(panel.tree, "payload");
+  await panel.runNodeAction("expandDecoded", payload.id);
+  assert.equal(payload.decoded?.root.type, "object", "the string's JSON is attached inline");
+  assert.equal(childValue(payload.decoded!.root, "items").children?.length, 2);
+
+  const before = panel.renderVersion;
+  const numberOffset = content.lastIndexOf("1");
+  await editor.edit((edit) => edit.replace(
+    new vscode.Range(document.positionAt(numberOffset), document.positionAt(numberOffset + 1)),
+    "2",
+  ));
+  const refreshed = await waitFor(() => {
+    const current = newestPanel(api, title);
+    return current !== undefined && current.renderVersion > before ? current : undefined;
+  }, "the live refresh after an edit");
+  assert.equal(childValue(refreshed.tree, "n").raw, "2");
+  assert.equal(refreshed.parsedVersion, document.version);
+  assert.equal(childValue(refreshed.tree, "payload").decoded?.root.type, "object", "inline decoding survives a refresh");
+}
+
+async function verifyOpenClipboardCommand(api: ExtensionTestApi): Promise<void> {
+  await vscode.env.clipboard.writeText('copied: {"from": "clipboard"}');
+  await vscode.commands.executeCommand("nestedJsonTree.openClipboard");
+  const panel = await waitFor(() => newestPanel(api, vscode.l10n.t("JSON Tree · Clipboard")), "the clipboard panel");
+  assert.equal(childValue(panel.tree, "from").value, "clipboard");
 }
 
 /** Proves the bundled Webview script loaded under the panel CSP and reached the host. */
 async function expectWebviewReady(
-  api: { readyWebviewCount(): number },
+  api: ExtensionTestApi,
   openPanel: () => Promise<void>,
 ): Promise<void> {
   const before = api.readyWebviewCount();
@@ -48,7 +152,7 @@ async function verifyOpenDocumentCommand(): Promise<void> {
   });
   await vscode.window.showTextDocument(document, { preview: false });
 
-  const expectedLabel = "JSON Tree · Untitled";
+  const expectedLabel = treeTitle("Untitled");
   const existingCount = viewerTabs().filter((tab) => tab.label === expectedLabel).length;
   await vscode.commands.executeCommand(OPEN_DOCUMENT_COMMAND);
   const tab = await waitForViewerTab(
@@ -68,7 +172,7 @@ async function verifyOpenCurrentLineCommand(): Promise<void> {
   const editor = await vscode.window.showTextDocument(document, { preview: false });
   editor.selection = new vscode.Selection(1, 0, 1, 0);
 
-  const expectedLabel = "JSON Tree · Untitled:2";
+  const expectedLabel = treeTitle("Untitled", 2);
   const existingCount = viewerTabs().filter((tab) => tab.label === expectedLabel).length;
   await vscode.commands.executeCommand(OPEN_CURRENT_LINE_COMMAND);
   const tab = await waitForViewerTab(
@@ -126,7 +230,7 @@ async function verifyRecoveredDocumentCommand(): Promise<void> {
     content: '{"source":"partial","bad":oops,"nested":{"ok":true}',
   });
   await vscode.window.showTextDocument(document, { preview: false });
-  const expectedLabel = "JSON Tree · Untitled";
+  const expectedLabel = treeTitle("Untitled");
   const existingCount = viewerTabs().filter((tab) => tab.label === expectedLabel).length;
   await vscode.commands.executeCommand(OPEN_DOCUMENT_COMMAND);
   const tab = await waitForViewerTab((candidate) => candidate.label === expectedLabel, existingCount);

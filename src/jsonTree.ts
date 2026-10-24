@@ -1,5 +1,5 @@
 import type { Node as JsoncNode } from "jsonc-parser";
-import type { JsonValue } from "./parser";
+import type { JsonRecovery, JsonValue } from "./parser";
 
 export type JsonTreeNodeType = "object" | "array" | "string" | "number" | "boolean" | "null";
 
@@ -28,6 +28,8 @@ export interface JsonTreeChild {
   key: string | number;
   /** Exact object-key token, including quotes and original escapes. */
   rawKey?: string;
+  /** Source offset of the object-key token, relative to the parsed text. */
+  keyOffset?: number;
   value: JsonTreeNode;
 }
 
@@ -45,6 +47,19 @@ export interface JsonTreeNode {
   /** Decoded value for strings and booleans; null for a null literal. */
   value?: string | boolean | null;
   children?: JsonTreeChild[];
+  /** Source range relative to the parsed text; absent inside decoded string content. */
+  offset?: number;
+  length?: number;
+  /** JSON parsed from this string node's value, attached on demand. */
+  decoded?: JsonTreeDecoded;
+}
+
+/** JSON embedded in a string value. Never part of copy/serialize output. */
+export interface JsonTreeDecoded {
+  root: JsonTreeNode;
+  /** Extra string-decoding passes beyond the first (double-encoded JSON). */
+  unwrapDepth: number;
+  recovery?: JsonRecovery;
 }
 
 /** Host-owned node/edge context. Webview messages identify only the node ID. */
@@ -53,9 +68,18 @@ export interface JsonTreeNodeContext {
   parent?: JsonTreeNodeContext;
   key?: string | number;
   rawKey?: string;
+  /** Set on the root of JSON decoded from the parent string node. */
+  decodedFrom?: JsonTreeDecoded;
   /** True when any object-key segment on this path has duplicate siblings. */
   hasDuplicateKeyInPath: boolean;
 }
+
+/** A decoded-string boundary inside a path: the value is parsed `passes` times. */
+export interface JsonPathDecodeSegment {
+  decode: number;
+}
+
+export type JsonTreePathSegment = string | number | JsonPathDecodeSegment;
 
 export interface JsonTreeWebviewChild {
   /** Display/search copy only. The host context retains the complete key. */
@@ -79,6 +103,9 @@ export interface JsonTreeWebviewNode {
   valueTruncated?: true;
   valueLength?: number;
   children?: JsonTreeWebviewChild[];
+  /** The string value looks like embedded JSON and can be decoded inline. */
+  decodable?: true;
+  decoded?: { root: JsonTreeWebviewNode; unwrapDepth: number; recovered?: true };
 }
 
 export interface JsonTreeWebviewModel {
@@ -93,6 +120,8 @@ export function buildJsonTree(root: JsoncNode, source: string): JsonTreeNode {
     const result: JsonTreeNode = {
       id: nextId,
       type: node.type as JsonTreeNodeType,
+      offset: node.offset,
+      length: node.length,
     };
     nextId += 1;
 
@@ -148,6 +177,7 @@ export function buildJsonTree(root: JsoncNode, source: string): JsonTreeNode {
         targetChildren.push({
           key: keyNode.value as string,
           rawKey: source.slice(keyNode.offset, keyNode.offset + keyNode.length),
+          keyOffset: keyNode.offset,
           value: targetChild,
         });
         childSources.push(valueNode);
@@ -167,62 +197,41 @@ export function isValidJsonTreeNodeId(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
+/** Edge marker for the root of JSON decoded from its parent string node. */
+const DECODED_EDGE = -2;
+
 /**
  * O(1) node lookup plus parent links for deriving trusted paths. Links live in
  * typed arrays; context objects are materialized only for a requested node, so
- * large trees do not pay for one context object per node.
+ * large trees do not pay for one context object per node. Decoded string
+ * content can be attached later and receives IDs after the existing ones.
  */
 export class JsonTreeIndex {
-  private readonly nodes: Array<JsonTreeNode | undefined>;
-  private readonly parents: Int32Array;
-  private readonly childIndexes: Int32Array;
-  private readonly duplicateKeyInPath: Uint8Array;
+  private nodes: Array<JsonTreeNode | undefined> = [];
+  private parents = new Int32Array(0);
+  private childIndexes = new Int32Array(0);
+  private duplicateKeyInPath = new Uint8Array(0);
 
-  constructor(root: JsonTreeNode) {
+  constructor(private readonly root: JsonTreeNode) {
     let maxId = root.id;
-    const scan = [root];
-    while (scan.length > 0) {
-      const current = scan.pop() as JsonTreeNode;
-      if (!isValidJsonTreeNodeId(current.id)) throw new Error(`Invalid JSON tree node ID ${current.id}.`);
-      if (current.id > maxId) maxId = current.id;
-      for (const child of current.children ?? []) scan.push(child.value);
-    }
+    walkJsonTree(root, (node) => {
+      if (!isValidJsonTreeNodeId(node.id)) throw new Error(`Invalid JSON tree node ID ${node.id}.`);
+      if (node.id > maxId) maxId = node.id;
+    });
+    this.ensureCapacity(maxId + 1);
+    this.register(root, -1, -1, false);
+  }
 
-    this.nodes = new Array(maxId + 1);
-    this.parents = new Int32Array(maxId + 1).fill(-1);
-    this.childIndexes = new Int32Array(maxId + 1).fill(-1);
-    this.duplicateKeyInPath = new Uint8Array(maxId + 1);
-    this.nodes[root.id] = root;
+  /** First ID that is free for newly attached nodes. */
+  get nextId(): number {
+    return this.nodes.length;
+  }
 
-    const pending = [root];
-    while (pending.length > 0) {
-      const parent = pending.pop() as JsonTreeNode;
-      const children = parent.children ?? [];
-      // Duplicate object keys make that segment, and every descendant, ambiguous.
-      const duplicateKeys = new Set<string>();
-      if (parent.type === "object") {
-        const seenKeys = new Set<string>();
-        for (const child of children) {
-          const key = child.key as string;
-          if (seenKeys.has(key)) duplicateKeys.add(key);
-          else seenKeys.add(key);
-        }
-      }
-      for (let index = 0; index < children.length; index += 1) {
-        const child = children[index];
-        const id = child.value.id;
-        if (this.nodes[id] !== undefined) throw new Error(`Duplicate JSON tree node ID ${id}.`);
-        this.nodes[id] = child.value;
-        this.parents[id] = parent.id;
-        this.childIndexes[id] = index;
-        this.duplicateKeyInPath[id] =
-          this.duplicateKeyInPath[parent.id] === 1 ||
-          (parent.type === "object" && duplicateKeys.has(child.key as string))
-            ? 1
-            : 0;
-        pending.push(child.value);
-      }
-    }
+  /** Total nodes, including attached decoded content. */
+  get size(): number {
+    let count = 0;
+    for (const node of this.nodes) if (node !== undefined) count += 1;
+    return count;
   }
 
   get(id: number): JsonTreeNodeContext | undefined {
@@ -240,16 +249,152 @@ export class JsonTreeIndex {
         context = { node, hasDuplicateKeyInPath: false };
         continue;
       }
+      const hasDuplicateKeyInPath = this.duplicateKeyInPath[nodeId] === 1;
+      if (this.childIndexes[nodeId] === DECODED_EDGE) {
+        context = { node, parent: context, decodedFrom: context.node.decoded, hasDuplicateKeyInPath };
+        continue;
+      }
       const edge = (context.node.children as JsonTreeChild[])[this.childIndexes[nodeId]];
-      context = {
-        node,
-        parent: context,
-        key: edge.key,
-        rawKey: edge.rawKey,
-        hasDuplicateKeyInPath: this.duplicateKeyInPath[nodeId] === 1,
-      };
+      context = { node, parent: context, key: edge.key, rawKey: edge.rawKey, hasDuplicateKeyInPath };
     }
     return context;
+  }
+
+  /**
+   * Attaches JSON decoded from a string node. The decoded tree is renumbered
+   * in place so its IDs follow every existing ID.
+   */
+  attachDecoded(stringNodeId: number, decoded: JsonTreeDecoded): void {
+    const owner = this.nodes[stringNodeId];
+    if (owner === undefined || owner.type !== "string") throw new Error(`Node ${stringNodeId} is not a string.`);
+    if (owner.decoded !== undefined) throw new Error(`Node ${stringNodeId} is already decoded.`);
+    let nextId = this.nextId;
+    walkJsonTree(decoded.root, (node) => {
+      node.id = nextId;
+      nextId += 1;
+      // Offsets inside decoded content refer to the string value, not the source.
+      delete node.offset;
+      delete node.length;
+      for (const child of node.children ?? []) delete child.keyOffset;
+    });
+    this.ensureCapacity(nextId);
+    owner.decoded = decoded;
+    this.register(decoded.root, stringNodeId, DECODED_EDGE, this.duplicateKeyInPath[stringNodeId] === 1);
+  }
+
+  /** Child-index path from the root (DECODED_EDGE marks a decoded boundary); survives re-parsing. */
+  structuralPath(id: number): number[] | undefined {
+    if (this.nodes[id] === undefined) return undefined;
+    const path: number[] = [];
+    for (let current = id; this.parents[current] >= 0; current = this.parents[current]) {
+      path.push(this.childIndexes[current]);
+    }
+    return path.reverse();
+  }
+
+  /** Resolves a structural path produced by another index for the same source. */
+  resolveStructuralPath(path: number[]): JsonTreeNode | undefined {
+    let node: JsonTreeNode | undefined = this.root;
+    for (const step of path) {
+      node = step === DECODED_EDGE ? node?.decoded?.root : node?.children?.[step]?.value;
+      if (node === undefined) return undefined;
+    }
+    return node;
+  }
+
+  /**
+   * Deepest node whose source range contains the offset (relative to the
+   * parsed text). Children are offset-ordered, so each level is a binary search.
+   */
+  nodeAtOffset(offset: number): JsonTreeNode | undefined {
+    const end = (node: JsonTreeNode): number => (node.offset ?? 0) + (node.length ?? 0);
+    const root = this.root;
+    if (root.offset === undefined || offset < root.offset || offset >= end(root)) return undefined;
+    let node = root;
+    for (;;) {
+      // A property spans from its key to the end of its value.
+      const children = node.children ?? [];
+      const start = (child: JsonTreeChild): number => child.keyOffset ?? child.value.offset ?? 0;
+      let low = 0;
+      let high = children.length;
+      while (low < high) {
+        const mid = (low + high) >>> 1;
+        if (start(children[mid]) <= offset) low = mid + 1;
+        else high = mid;
+      }
+      const candidate = children[low - 1];
+      if (candidate === undefined || candidate.value.offset === undefined || offset >= end(candidate.value)) return node;
+      node = candidate.value;
+    }
+  }
+
+  /** IDs from the root down to the node, inclusive. */
+  ancestry(id: number): number[] {
+    const ids: number[] = [];
+    for (let current = id; current >= 0; current = this.parents[current]) ids.push(current);
+    return ids.reverse();
+  }
+
+  private ensureCapacity(capacity: number): void {
+    if (capacity <= this.parents.length) {
+      if (this.nodes.length < capacity) this.nodes.length = capacity;
+      return;
+    }
+    const size = Math.max(capacity, this.parents.length * 2);
+    const grow = <T extends Int32Array | Uint8Array>(current: T, next: T, fill?: number): T => {
+      if (fill !== undefined) next.fill(fill);
+      next.set(current);
+      return next;
+    };
+    this.parents = grow(this.parents, new Int32Array(size), -1);
+    this.childIndexes = grow(this.childIndexes, new Int32Array(size), -1);
+    this.duplicateKeyInPath = grow(this.duplicateKeyInPath, new Uint8Array(size));
+    this.nodes.length = capacity;
+  }
+
+  private register(root: JsonTreeNode, parentId: number, edge: number, inheritedDuplicate: boolean): void {
+    if (this.nodes[root.id] !== undefined) throw new Error(`Duplicate JSON tree node ID ${root.id}.`);
+    this.nodes[root.id] = root;
+    this.parents[root.id] = parentId;
+    this.childIndexes[root.id] = edge;
+    this.duplicateKeyInPath[root.id] = inheritedDuplicate ? 1 : 0;
+
+    const pending = [root];
+    while (pending.length > 0) {
+      const parent = pending.pop() as JsonTreeNode;
+      const children = parent.children ?? [];
+      // Duplicate object keys make that segment, and every descendant, ambiguous.
+      const duplicateKeys = new Set<string>();
+      if (parent.type === "object") {
+        const seenKeys = new Set<string>();
+        for (const child of children) {
+          const key = child.key as string;
+          if (seenKeys.has(key)) duplicateKeys.add(key);
+          else seenKeys.add(key);
+        }
+      }
+      const parentDuplicate = this.duplicateKeyInPath[parent.id] === 1;
+      for (let index = 0; index < children.length; index += 1) {
+        const child = children[index];
+        const id = child.value.id;
+        if (this.nodes[id] !== undefined) throw new Error(`Duplicate JSON tree node ID ${id}.`);
+        this.nodes[id] = child.value;
+        this.parents[id] = parent.id;
+        this.childIndexes[id] = index;
+        this.duplicateKeyInPath[id] =
+          parentDuplicate || (parent.type === "object" && duplicateKeys.has(child.key as string)) ? 1 : 0;
+        pending.push(child.value);
+      }
+      const decodedRoot = parent.decoded?.root;
+      if (decodedRoot !== undefined) {
+        if (this.nodes[decodedRoot.id] !== undefined) throw new Error(`Duplicate JSON tree node ID ${decodedRoot.id}.`);
+        this.nodes[decodedRoot.id] = decodedRoot;
+        this.parents[decodedRoot.id] = parent.id;
+        this.childIndexes[decodedRoot.id] = DECODED_EDGE;
+        this.duplicateKeyInPath[decodedRoot.id] = parentDuplicate ? 1 : 0;
+        pending.push(decodedRoot);
+      }
+    }
   }
 }
 
@@ -257,18 +402,54 @@ export function buildJsonTreeContextIndex(root: JsonTreeNode): JsonTreeIndex {
   return new JsonTreeIndex(root);
 }
 
-/** Restores a decoded path from host-owned parent links in O(depth). */
+/** Visits every node, including attached decoded content, without recursion. */
+export function walkJsonTree(root: JsonTreeNode, visit: (node: JsonTreeNode) => void): void {
+  const pending = [root];
+  while (pending.length > 0) {
+    const node = pending.pop() as JsonTreeNode;
+    visit(node);
+    if (node.decoded !== undefined) pending.push(node.decoded.root);
+    const children = node.children ?? [];
+    for (let index = children.length - 1; index >= 0; index -= 1) pending.push(children[index].value);
+  }
+}
+
+/**
+ * Restores a decoded path from host-owned parent links in O(depth). Decoded
+ * string boundaries appear as `{ decode: passes }` segments.
+ */
 export function materializeJsonTreePath(
   context: JsonTreeNodeContext,
-): Array<string | number> {
-  const path: Array<string | number> = [];
+): JsonTreePathSegment[] {
+  const path: JsonTreePathSegment[] = [];
   let current: JsonTreeNodeContext | undefined = context;
   while (current.parent !== undefined) {
-    path.push(current.key as string | number);
+    path.push(current.decodedFrom !== undefined
+      ? { decode: current.decodedFrom.unwrapDepth + 1 }
+      : current.key as string | number);
     current = current.parent;
   }
   path.reverse();
   return path;
+}
+
+/** Cheap pre-check: does a decoded string value look like one embedded JSON container? */
+export function looksLikeEmbeddedJson(value: string): boolean {
+  let start = 0;
+  let end = value.length - 1;
+  while (start <= end && isJsonWhitespace(value.charCodeAt(start))) start += 1;
+  while (end >= start && isJsonWhitespace(value.charCodeAt(end))) end -= 1;
+  if (end - start < 1) return false;
+  const first = value[start];
+  const last = value[end];
+  if ((first === "{" && last === "}") || (first === "[" && last === "]")) return true;
+  // Double-encoded JSON: a JSON string literal whose content is a container.
+  return first === '"' && last === '"' && end - start >= 3 &&
+    (value.startsWith("{", start + 1) || value.startsWith("[", start + 1));
+}
+
+function isJsonWhitespace(code: number): boolean {
+  return code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d;
 }
 
 /**
@@ -297,6 +478,7 @@ export function createJsonTreeWebviewModel(
     };
   };
 
+  const pending: Array<{ source: JsonTreeNode; target: JsonTreeWebviewNode }> = [];
   const copyNode = (node: JsonTreeNode): JsonTreeWebviewNode => {
     const target: JsonTreeWebviewNode = { id: node.id, type: node.type };
     if (node.raw !== undefined) {
@@ -314,6 +496,14 @@ export function createJsonTreeWebviewModel(
         target.valueTruncated = true;
         target.valueLength = value.length;
       }
+      if (node.decoded !== undefined) {
+        const decodedRoot = copyNode(node.decoded.root);
+        target.decoded = { root: decodedRoot, unwrapDepth: node.decoded.unwrapDepth };
+        if (node.decoded.recovery !== undefined) target.decoded.recovered = true;
+        pending.push({ source: node.decoded.root, target: decodedRoot });
+      } else if (looksLikeEmbeddedJson(node.value)) {
+        target.decodable = true;
+      }
     } else if (node.value !== undefined) {
       target.value = node.value;
     }
@@ -322,9 +512,7 @@ export function createJsonTreeWebviewModel(
   };
 
   const targetRoot = copyNode(root);
-  const pending: Array<{ source: JsonTreeNode; target: JsonTreeWebviewNode }> = [
-    { source: root, target: targetRoot },
-  ];
+  pending.push({ source: root, target: targetRoot });
   while (pending.length > 0) {
     const current = pending.pop() as { source: JsonTreeNode; target: JsonTreeWebviewNode };
     const sourceChildren = current.source.children ?? [];

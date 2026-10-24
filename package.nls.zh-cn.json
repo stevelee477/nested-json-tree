@@ -1,0 +1,9 @@
+{
+  "extension.description": "以可递归展开的树形式查看 JSON、JSONL 行、选中内容和转义的 JSON 字符串。",
+  "command.openDocument.title": "以树形式打开文档",
+  "command.openCurrentLine.title": "以树形式打开当前行",
+  "command.openSelection.title": "以树形式打开选中内容",
+  "command.openClipboard.title": "以树形式打开剪贴板",
+  "config.autoExpandMaxNodes": "JSON 的值节点数不超过此值时，自动展开所有对象和数组。设为 `0` 可关闭自动展开子节点。超过 10,000 个节点的根节点始终保持折叠。",
+  "config.maxValueNodes": "单个文档或树最多解析的 JSON 值节点数（对象、数组和基本值）。值越大，占用的 Extension Host 内存越多，每百万节点约 250 MB。"
+}

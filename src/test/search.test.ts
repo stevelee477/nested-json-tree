@@ -73,3 +73,16 @@ test("lossless-tree search uses raw numbers and distinguishes duplicate-key node
   assert.equal(numberResult.expandIds.has(tree.id), true);
   assert.deepEqual(search(tree, "\\u0061").state.matches, [tree.children?.[2].value.id]);
 });
+
+test("search covers decoded JSON and marks its string owner for expansion", () => {
+  const tree = lossless('{"payload": "{\\"secret\\": 1}"}');
+  const owner = tree.children![0].value;
+  owner.decoded = { root: { id: 99, type: "object", children: [
+    { key: "secret", rawKey: '"secret"', value: { id: 100, type: "number", raw: "1" } },
+  ] }, unwrapDepth: 0 };
+  const { state } = search(tree, "secret");
+  // The escaped string itself matches too; the decoded key is found separately.
+  assert.deepEqual(state.matches, [owner.id, 100]);
+  assert.equal(state.expandIds.has(owner.id), true);
+  assert.equal(state.expandIds.has(99), true);
+});

@@ -3,11 +3,13 @@ import * as vscode from "vscode";
 import {
   JsonCandidate,
   JsonProcessingLimitError,
+  JsonValueNodeLimitError,
   assertInputSize,
   parseJsonCandidates,
   parseNestedJsonCandidates,
 } from "./parser";
 import {
+  JsonTreeDecoded,
   JsonTreeIndex,
   JsonTreeNode,
   JsonTreeNodeContext,
@@ -16,15 +18,24 @@ import {
   buildJsonTreeContextIndex,
   createJsonTreeWebviewModel,
   isValidJsonTreeNodeId,
+  looksLikeEmbeddedJson,
   materializeJsonTreePath,
   stringifyJsonTreeForTransfer,
+  walkJsonTree,
 } from "./jsonTree";
 import {
   formatJqPathForTransfer,
   formatJsonPathForDisplay,
   formatJsonPathForTransfer,
+  isDecodedPath,
 } from "./paths";
-import { NODE_ACTIONS, NodeAction, RenderMessage } from "./protocol";
+import {
+  HostToWebviewMessage,
+  NODE_ACTIONS,
+  NodeAction,
+  RenderMessage,
+  SourceViewState,
+} from "./protocol";
 import {
   describeLimitError,
   getAutoExpandMaxNodes,
@@ -37,8 +48,14 @@ import {
   shouldAutoExpandTree,
 } from "./treeOptions";
 import { findJsonlRecord } from "./jsonlNavigator";
+import { renderWebviewHtml } from "./webviewHtml";
 
 export const VIEW_TYPE = "nestedJsonTree.viewer";
+
+/** Larger documents are not re-parsed on every edit; the panel offers Refresh. */
+const LIVE_REFRESH_MAX_CHARACTERS = 2_000_000;
+const LIVE_REFRESH_DELAY_MS = 400;
+const CURSOR_SYNC_DELAY_MS = 100;
 
 /** Webviews whose bundled script has started; exposed to integration tests. */
 let readyWebviewCount = 0;
@@ -47,12 +64,38 @@ export function getReadyWebviewCount(): number {
   return readyWebviewCount;
 }
 
+/** Host-side view of an open panel for integration tests; not a public API. */
+export interface PanelTestHandle {
+  title: string;
+  renderVersion: number;
+  parsedVersion: number | undefined;
+  tree: JsonTreeNode;
+  lastSyncedNodeId: number | undefined;
+  runNodeAction(action: NodeAction, nodeId: number): Promise<void>;
+}
+
+const openPanels = new Set<JsonTreePanel>();
+
+export function getPanelTestHandles(): PanelTestHandle[] {
+  return [...openPanels].map((panel) => panel.testHandle());
+}
+
 export interface JsonlSourceContext {
   uri: vscode.Uri;
   sourceName: string;
   lineNumber: number;
   lineCount: number;
   followCursor?: boolean;
+}
+
+/** A tree parsed from a whole document or from a selection in it. */
+export interface DocumentSource {
+  uri: vscode.Uri;
+  scope: "document" | "selection";
+  /** Document offset of the parsed text (0 for a whole document). */
+  baseOffset: number;
+  /** Document version the tree was parsed from. */
+  version: number;
 }
 
 export type CandidatePicker = (
@@ -71,6 +114,7 @@ export interface PanelInit {
   title: string;
   pathLabel?: string;
   viewColumn?: vscode.ViewColumn;
+  source?: DocumentSource;
   jsonlSource?: JsonlSourceContext;
 }
 
@@ -80,8 +124,14 @@ export class JsonTreePanel {
   private renderVersion = 0;
   private navigationGeneration = 0;
   private followCursorTimer: ReturnType<typeof setTimeout> | undefined;
+  private cursorSyncTimer: ReturnType<typeof setTimeout> | undefined;
+  private refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastSyncedNodeId: number | undefined;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly jsonlSource?: Required<JsonlSourceContext>;
+  private readonly source?: DocumentSource & { syncCursor: boolean; status: string; canRefresh: boolean };
+  /** Document version the displayed tree was parsed from; undefined when unknown or unlinked. */
+  private parsedVersion: number | undefined;
   private candidate: JsonCandidate;
   private title: string;
   private pathLabel: string;
@@ -110,27 +160,78 @@ export class JsonTreePanel {
     this.disposables.push(
       panel.webview.onDidReceiveMessage((message: unknown) => {
         this.handleMessage(message).catch((error: unknown) => {
-          reportUnexpectedError("Tree View action", error);
+          reportUnexpectedError(vscode.l10n.t("Tree View action"), error);
         });
       }),
       panel.onDidDispose(() => this.dispose()),
     );
     if (init.jsonlSource !== undefined) {
       this.jsonlSource = { ...init.jsonlSource, followCursor: init.jsonlSource.followCursor ?? false };
+    } else if (init.source !== undefined) {
+      this.source = { ...init.source, syncCursor: true, status: "", canRefresh: false };
+      this.parsedVersion = init.source.version;
+    }
+    const uri = this.sourceUri();
+    if (uri !== undefined) {
+      if (this.jsonlSource !== undefined) {
+        // JSONL panels are created right after reading the line, so the open
+        // document's current version is the parsed one.
+        this.parsedVersion = vscode.workspace.textDocuments
+          .find((document) => document.uri.toString() === uri.toString())?.version;
+      }
       this.disposables.push(
         vscode.window.onDidChangeTextEditorSelection((event) => this.handleSourceSelection(event)),
+        vscode.workspace.onDidChangeTextDocument((event) => this.handleSourceEdit(event)),
       );
     }
     panel.webview.html = this.getHtml(panel.webview);
+    openPanels.add(this);
+  }
+
+  testHandle(): PanelTestHandle {
+    return {
+      title: this.title,
+      renderVersion: this.renderVersion,
+      parsedVersion: this.parsedVersion,
+      tree: this.candidate.tree,
+      lastSyncedNodeId: this.lastSyncedNodeId,
+      runNodeAction: async (action, nodeId) => {
+        const context = this.index.get(nodeId);
+        if (context === undefined) throw new Error(`Unknown node ${nodeId}.`);
+        await this.runNodeAction(action, context);
+      },
+    };
   }
 
   private dispose(): void {
+    openPanels.delete(this);
     this.navigationGeneration += 1;
-    if (this.followCursorTimer !== undefined) clearTimeout(this.followCursorTimer);
+    for (const timer of [this.followCursorTimer, this.cursorSyncTimer, this.refreshTimer]) {
+      if (timer !== undefined) clearTimeout(timer);
+    }
     for (const disposable of this.disposables.splice(0)) disposable.dispose();
   }
 
-  private async postRender(status = ""): Promise<void> {
+  private post(message: HostToWebviewMessage): Thenable<boolean> {
+    return this.panel.webview.postMessage(message);
+  }
+
+  private sourceUri(): vscode.Uri | undefined {
+    return this.source?.uri ?? this.jsonlSource?.uri;
+  }
+
+  private sourceViewState(): SourceViewState | undefined {
+    const source = this.source;
+    if (source === undefined) return undefined;
+    return {
+      linked: this.parsedVersion !== undefined,
+      syncCursor: source.syncCursor,
+      status: source.status,
+      canRefresh: source.canRefresh,
+    };
+  }
+
+  private async postRender(status = "", preserveView = false): Promise<void> {
     const tree = this.candidate.tree;
     // Built per render rather than retained: the bounded copy is only needed
     // while it is being transferred to the Webview.
@@ -154,8 +255,10 @@ export class JsonTreePanel {
             followCursor: this.jsonlSource.followCursor,
             status,
           },
+      source: this.sourceViewState(),
+      preserveView,
     };
-    await this.panel.webview.postMessage(message);
+    await this.post(message);
   }
 
   private async handleMessage(message: unknown): Promise<void> {
@@ -163,11 +266,13 @@ export class JsonTreePanel {
 
     if (message.type === "ready") {
       readyWebviewCount += 1;
+      this.lastSyncedNodeId = undefined;
       await this.postRender();
       return;
     }
 
     if (await this.handleJsonlMessage(message)) return;
+    if (await this.handleSourceMessage(message)) return;
 
     if (!NODE_ACTIONS.has(message.type) || !isValidJsonTreeNodeId(message.nodeId)) return;
     const context = this.index.get(message.nodeId);
@@ -180,11 +285,11 @@ export class JsonTreePanel {
     switch (action) {
       case "copyKey":
         if (context.parent !== undefined && context.key !== undefined) {
-          await copyText(String(context.key), "key");
+          await copyText(String(context.key), vscode.l10n.t("key"));
         }
         return;
       case "copyRawKey":
-        if (context.rawKey !== undefined) await copyText(context.rawKey, "raw key");
+        if (context.rawKey !== undefined) await copyText(context.rawKey, vscode.l10n.t("raw key"));
         return;
       case "copyJsonPath":
       case "copyJqPath":
@@ -194,10 +299,10 @@ export class JsonTreePanel {
         await copyValue(node);
         return;
       case "copyRawString":
-        if (node.type === "string") await copyText(node.raw as string, "value");
+        if (node.type === "string") await copyText(node.raw as string, vscode.l10n.t("value"));
         return;
       case "copyDecodedString":
-        if (node.type === "string") await copyText(node.value as string, "value");
+        if (node.type === "string") await copyText(node.value as string, vscode.l10n.t("value"));
         return;
       case "openDecodedValue":
         if (node.type === "string") await openDecodedValue(node);
@@ -205,6 +310,15 @@ export class JsonTreePanel {
       case "openNested":
       case "openParsedJson":
         if (node.type === "string") await this.openNestedString(action, context);
+        return;
+      case "openLink":
+        if (node.type === "string") await openLink(node.value as string);
+        return;
+      case "revealInSource":
+        await this.revealInSource(context);
+        return;
+      case "expandDecoded":
+        await this.expandDecoded(context);
         return;
     }
   }
@@ -219,13 +333,15 @@ export class JsonTreePanel {
       candidates = parseNestedJsonCandidates(context.node.value as string, getParseOptions());
     } catch (error) {
       if (error instanceof JsonProcessingLimitError) {
-        void vscode.window.showErrorMessage(`Cannot open nested JSON at ${displayPath}: ${describeLimitError(error)}`);
+        void vscode.window.showErrorMessage(
+          vscode.l10n.t("Cannot open nested JSON at {0}: {1}", displayPath, describeLimitError(error)),
+        );
         return;
       }
       throw error;
     }
     if (candidates.length === 0) {
-      void vscode.window.showWarningMessage(`The string at ${displayPath} does not contain valid JSON.`);
+      void vscode.window.showWarningMessage(vscode.l10n.t("The string at {0} does not contain valid JSON.", displayPath));
       return;
     }
 
@@ -238,10 +354,60 @@ export class JsonTreePanel {
     }
     JsonTreePanel.create(this.services, {
       candidate: selected,
-      title: `Nested JSON · ${displayPath}`,
+      title: vscode.l10n.t("Nested JSON · {0}", displayPath),
       pathLabel: displayPath,
       viewColumn: this.panel.viewColumn ?? vscode.ViewColumn.Active,
     });
+  }
+
+  /** Decodes JSON embedded in a string node and attaches it inline. */
+  private async expandDecoded(context: JsonTreeNodeContext): Promise<void> {
+    const node = context.node;
+    if (node.type !== "string") return;
+    if (node.decoded !== undefined) {
+      await this.post({ type: "decoded", nodeId: node.id, decoded: webviewDecoded(node.decoded) });
+      return;
+    }
+    const value = node.value as string;
+    const displayPath = formatJsonPathForDisplay(materializeJsonTreePath(context));
+    const fail = async (warning?: string): Promise<void> => {
+      if (warning !== undefined) void vscode.window.showWarningMessage(warning);
+      await this.post({ type: "decodeFailed", nodeId: node.id });
+    };
+    if (!looksLikeEmbeddedJson(value)) {
+      await fail(vscode.l10n.t("The string at {0} does not contain valid JSON.", displayPath));
+      return;
+    }
+
+    const renderVersion = this.renderVersion;
+    let decoded: JsonTreeDecoded | null | undefined;
+    try {
+      decoded = await decodeEmbeddedJson(value, this.remainingNodeBudget(), (candidates) =>
+        this.services.pickCandidate(candidates, displayPath));
+    } catch (error) {
+      if (error instanceof JsonProcessingLimitError) {
+        await fail(vscode.l10n.t("Cannot decode JSON at {0}: {1}", displayPath, describeLimitError(error)));
+        return;
+      }
+      throw error;
+    }
+    // The panel may have moved to another record while a picker was open.
+    if (renderVersion !== this.renderVersion || node.decoded !== undefined) return;
+    if (decoded === null) {
+      await fail(vscode.l10n.t("The string at {0} does not contain a JSON object or array.", displayPath));
+      return;
+    }
+    if (decoded === undefined) {
+      await fail();
+      return;
+    }
+    this.index.attachDecoded(node.id, decoded);
+    await this.post({ type: "decoded", nodeId: node.id, decoded: webviewDecoded(decoded) });
+  }
+
+  private remainingNodeBudget(): number {
+    const limit = getParseOptions().maxValueNodes;
+    return limit === undefined ? Number.POSITIVE_INFINITY : limit - this.index.size;
   }
 
   private async handleJsonlMessage(message: PanelMessage): Promise<boolean> {
@@ -250,7 +416,10 @@ export class JsonTreePanel {
     switch (message.type) {
       case "setFollowCursor":
         source.followCursor = message.enabled === true;
-        await this.postJsonlState(source.followCursor ? "Following source cursor" : "Follow cursor off");
+        this.lastSyncedNodeId = undefined;
+        await this.postJsonlState(source.followCursor
+          ? vscode.l10n.t("Following source cursor")
+          : vscode.l10n.t("Follow cursor off"));
         return true;
       case "revealSource":
         await this.revealSourceLine();
@@ -270,15 +439,32 @@ export class JsonTreePanel {
     }
   }
 
+  private async handleSourceMessage(message: PanelMessage): Promise<boolean> {
+    const source = this.source;
+    if (source === undefined) return false;
+    switch (message.type) {
+      case "setSyncCursor":
+        source.syncCursor = message.enabled === true;
+        this.lastSyncedNodeId = undefined;
+        await this.postSourceState();
+        return true;
+      case "refreshSource":
+        await this.refreshFromSource(true);
+        return true;
+      default:
+        return false;
+    }
+  }
+
   private async navigateJsonl(startLine: number, direction: -1 | 1): Promise<void> {
     const source = this.jsonlSource;
     if (source === undefined) return;
     const generation = ++this.navigationGeneration;
     const isCurrent = (): boolean => generation === this.navigationGeneration;
-    await this.postJsonlState("Scanning…", true);
+    await this.postJsonlState(vscode.l10n.t("Scanning…"), true);
     // Every exit path must clear the busy state, including a source document
     // that was deleted or renamed after the panel opened.
-    let finalStatus: string | undefined = "Could not read the source document";
+    let finalStatus: string | undefined = vscode.l10n.t("Could not read the source document");
     try {
       const document = await vscode.workspace.openTextDocument(source.uri);
       source.lineCount = document.lineCount;
@@ -300,41 +486,54 @@ export class JsonTreePanel {
       );
       if (!isCurrent() || result.status === "cancelled") return;
       if (result.status === "not-found") {
-        finalStatus = direction > 0 ? "No later valid JSON line" : "No earlier valid JSON line";
+        finalStatus = direction > 0
+          ? vscode.l10n.t("No later valid JSON line")
+          : vscode.l10n.t("No earlier valid JSON line");
         return;
       }
       finalStatus = "";
-      const selected = await this.services.pickCandidate(result.record.candidates, `line ${result.record.lineNumber + 1}`);
+      const selected = await this.services.pickCandidate(
+        result.record.candidates,
+        vscode.l10n.t("line {0}", result.record.lineNumber + 1),
+      );
       if (!isCurrent() || selected === undefined) return;
       const skipped = result.record.skippedLines;
-      this.updateJsonlCandidate(selected, result.record.lineNumber);
+      this.updateJsonlCandidate(selected, result.record.lineNumber, document.version);
       finalStatus = undefined;
       await this.postRender(
         skipped === 0
           ? ""
-          : `Skipped ${skipped.toLocaleString()} invalid or empty line${skipped === 1 ? "" : "s"}`,
+          : skipped === 1
+            ? vscode.l10n.t("Skipped 1 invalid or empty line")
+            : vscode.l10n.t("Skipped {0} invalid or empty lines", skipped.toLocaleString()),
       );
     } finally {
       if (finalStatus !== undefined && isCurrent()) await this.postJsonlState(finalStatus);
     }
   }
 
-  private updateJsonlCandidate(candidate: JsonCandidate, lineNumber: number): void {
+  private updateJsonlCandidate(candidate: JsonCandidate, lineNumber: number, version: number): void {
     const source = this.jsonlSource;
     if (source === undefined) return;
     source.lineNumber = lineNumber;
+    this.replaceCandidate(candidate, version);
+    this.title = vscode.l10n.t("JSON Tree · {0}:{1}", source.sourceName, lineNumber + 1);
+    this.pathLabel = vscode.l10n.t("$ · line {0}", lineNumber + 1);
+    this.panel.title = this.title;
+  }
+
+  private replaceCandidate(candidate: JsonCandidate, version: number | undefined): void {
     this.candidate = candidate;
     this.index = buildJsonTreeContextIndex(candidate.tree);
     this.renderVersion += 1;
-    this.title = `JSON Tree · ${source.sourceName}:${lineNumber + 1}`;
-    this.pathLabel = `$ · line ${lineNumber + 1}`;
-    this.panel.title = this.title;
+    this.parsedVersion = version;
+    this.lastSyncedNodeId = undefined;
   }
 
   private async postJsonlState(status: string, busy = false): Promise<void> {
     const source = this.jsonlSource;
     if (source === undefined) return;
-    await this.panel.webview.postMessage({
+    await this.post({
       type: "jsonlState",
       lineNumber: source.lineNumber + 1,
       lineCount: source.lineCount,
@@ -344,19 +543,186 @@ export class JsonTreePanel {
     });
   }
 
+  private async postSourceState(): Promise<void> {
+    const state = this.sourceViewState();
+    if (state !== undefined) await this.post({ type: "sourceState", ...state });
+  }
+
   private handleSourceSelection(event: vscode.TextEditorSelectionChangeEvent): void {
-    const source = this.jsonlSource;
-    if (
-      source === undefined ||
-      !source.followCursor ||
-      event.textEditor.document.uri.toString() !== source.uri.toString()
-    ) return;
-    if (this.followCursorTimer !== undefined) clearTimeout(this.followCursorTimer);
-    const lineNumber = event.selections[0]?.active.line;
-    if (lineNumber === undefined || lineNumber === source.lineNumber) return;
-    this.followCursorTimer = setTimeout(() => {
-      this.followSourceLine(lineNumber).catch((error: unknown) => reportUnexpectedError("Follow cursor", error));
-    }, 150);
+    const uri = this.sourceUri();
+    if (uri === undefined || event.textEditor.document.uri.toString() !== uri.toString()) return;
+    const position = event.selections[0]?.active;
+    if (position === undefined) return;
+
+    const jsonl = this.jsonlSource;
+    if (jsonl !== undefined) {
+      if (!jsonl.followCursor) return;
+      if (this.followCursorTimer !== undefined) clearTimeout(this.followCursorTimer);
+      if (position.line !== jsonl.lineNumber) {
+        const lineNumber = position.line;
+        this.followCursorTimer = setTimeout(() => {
+          this.followSourceLine(lineNumber).catch((error: unknown) =>
+            reportUnexpectedError(vscode.l10n.t("Follow cursor"), error));
+        }, 150);
+        return;
+      }
+    } else if (!this.source?.syncCursor) {
+      return;
+    }
+
+    if (this.cursorSyncTimer !== undefined) clearTimeout(this.cursorSyncTimer);
+    const document = event.textEditor.document;
+    this.cursorSyncTimer = setTimeout(() => {
+      this.syncNodeToCursor(document, position).catch((error: unknown) =>
+        reportUnexpectedError(vscode.l10n.t("Sync with editor"), error));
+    }, CURSOR_SYNC_DELAY_MS);
+  }
+
+  /** Highlights the deepest node under the editor cursor without taking focus. */
+  private async syncNodeToCursor(document: vscode.TextDocument, position: vscode.Position): Promise<void> {
+    if (this.parsedVersion === undefined || document.version !== this.parsedVersion) return;
+    const base = this.parsedTextOffset(document);
+    if (base === undefined) return;
+    const node = this.index.nodeAtOffset(document.offsetAt(position) - base - this.candidate.start);
+    if (node === undefined || node.id === this.lastSyncedNodeId) return;
+    this.lastSyncedNodeId = node.id;
+    await this.post({ type: "revealNode", ids: this.index.ancestry(node.id) });
+  }
+
+  /** Document offset where the parsed text starts, for the current document version. */
+  private parsedTextOffset(document: vscode.TextDocument): number | undefined {
+    if (this.source !== undefined) return this.source.baseOffset;
+    if (this.jsonlSource !== undefined && this.jsonlSource.lineNumber < document.lineCount) {
+      return document.offsetAt(new vscode.Position(this.jsonlSource.lineNumber, 0));
+    }
+    return undefined;
+  }
+
+  private async revealInSource(context: JsonTreeNodeContext): Promise<void> {
+    const uri = this.sourceUri();
+    if (uri === undefined) return;
+    // Decoded string content has no source range; reveal the string itself.
+    let target: JsonTreeNodeContext | undefined = context;
+    while (target !== undefined && target.node.offset === undefined) target = target.parent;
+    if (target === undefined) return;
+
+    const document = await vscode.workspace.openTextDocument(uri);
+    if (this.parsedVersion === undefined || document.version !== this.parsedVersion) {
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t("The source changed after this tree was parsed. Refresh the tree, then try again."),
+      );
+      return;
+    }
+    const base = this.parsedTextOffset(document);
+    if (base === undefined) return;
+    const start = base + this.candidate.start + (target.node.offset as number);
+    const range = new vscode.Range(
+      document.positionAt(start),
+      document.positionAt(start + (target.node.length ?? 0)),
+    );
+    const visible = vscode.window.visibleTextEditors.find(
+      (editor) => editor.document.uri.toString() === uri.toString(),
+    );
+    const editor = await vscode.window.showTextDocument(document, {
+      preview: false,
+      viewColumn: visible?.viewColumn ?? vscode.ViewColumn.Beside,
+      selection: range,
+    });
+    editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+  }
+
+  private handleSourceEdit(event: vscode.TextDocumentChangeEvent): void {
+    const uri = this.sourceUri();
+    if (uri === undefined || event.contentChanges.length === 0 || event.document.uri.toString() !== uri.toString()) {
+      return;
+    }
+    if (this.refreshTimer !== undefined) clearTimeout(this.refreshTimer);
+
+    const source = this.source;
+    if (source?.scope === "selection") {
+      // A selection's offsets cannot be tracked through edits.
+      this.parsedVersion = undefined;
+      source.status = vscode.l10n.t("The source changed; this selection tree is no longer linked to it.");
+      void this.postSourceState();
+      return;
+    }
+    if (source !== undefined && event.document.getText().length > LIVE_REFRESH_MAX_CHARACTERS) {
+      source.status = vscode.l10n.t("The source changed.");
+      source.canRefresh = true;
+      void this.postSourceState();
+      return;
+    }
+    this.refreshTimer = setTimeout(() => {
+      this.refreshFromSource(false).catch((error: unknown) =>
+        reportUnexpectedError(vscode.l10n.t("Refresh"), error));
+    }, LIVE_REFRESH_DELAY_MS);
+  }
+
+  /**
+   * Re-parses the same scope (whole document or JSONL line), keeps the most
+   * similar candidate, re-attaches inline-decoded strings, and preserves the
+   * Webview's expansion by structure.
+   */
+  private async refreshFromSource(requested: boolean): Promise<void> {
+    const uri = this.sourceUri();
+    if (uri === undefined || this.source?.scope === "selection") return;
+    const generation = ++this.navigationGeneration;
+    const document = await vscode.workspace.openTextDocument(uri);
+    if (generation !== this.navigationGeneration) return;
+
+    const jsonl = this.jsonlSource;
+    if (jsonl !== undefined && jsonl.lineNumber >= document.lineCount) return;
+    const text = jsonl !== undefined ? document.lineAt(jsonl.lineNumber).text : document.getText();
+    const keepLast = vscode.l10n.t("showing the last valid version");
+    let candidates: JsonCandidate[];
+    try {
+      assertInputSize(text);
+      candidates = parseJsonCandidates(text, getParseOptions());
+    } catch (error) {
+      if (!(error instanceof JsonProcessingLimitError)) throw error;
+      this.parsedVersion = undefined;
+      await this.setRefreshStatus(`${describeLimitError(error)} · ${keepLast}`);
+      return;
+    }
+    if (candidates.length === 0) {
+      this.parsedVersion = undefined;
+      await this.setRefreshStatus(vscode.l10n.t("The source has no valid JSON; {0}", keepLast));
+      return;
+    }
+
+    const previous = this.candidate;
+    const decodedPaths: number[][] = [];
+    walkJsonTree(previous.tree, (node) => {
+      if (node.decoded !== undefined) decodedPaths.push(this.index.structuralPath(node.id) ?? []);
+    });
+    const next = candidates.reduce((best, candidate) =>
+      Math.abs(candidate.start - previous.start) < Math.abs(best.start - previous.start) ? candidate : best);
+    this.replaceCandidate(next, document.version);
+    for (const path of decodedPaths) {
+      const node = this.index.resolveStructuralPath(path);
+      if (node?.type !== "string" || node.decoded !== undefined) continue;
+      try {
+        const decoded = await decodeEmbeddedJson(node.value as string, this.remainingNodeBudget(), async (all) => all[0]);
+        if (decoded) this.index.attachDecoded(node.id, decoded);
+      } catch (error) {
+        if (!(error instanceof JsonProcessingLimitError)) throw error;
+      }
+    }
+    if (this.source !== undefined) {
+      this.source.status = requested ? vscode.l10n.t("Refreshed") : "";
+      this.source.canRefresh = false;
+    }
+    await this.postRender("", true);
+  }
+
+  private async setRefreshStatus(status: string): Promise<void> {
+    if (this.source !== undefined) {
+      this.source.status = status;
+      this.source.canRefresh = true;
+      await this.postSourceState();
+    } else {
+      await this.postJsonlState(status);
+    }
   }
 
   private async followSourceLine(lineNumber: number): Promise<void> {
@@ -377,15 +743,15 @@ export class JsonTreePanel {
     }
     if (generation !== this.navigationGeneration) return;
     if (candidates.length === 0) {
-      await this.postJsonlState(`Line ${lineNumber + 1} has no valid JSON`);
+      await this.postJsonlState(vscode.l10n.t("Line {0} has no valid JSON", lineNumber + 1));
       return;
     }
     // Moving the cursor must never open a picker; Go/Prev/Next still offer one.
-    this.updateJsonlCandidate(candidates[0], lineNumber);
+    this.updateJsonlCandidate(candidates[0], lineNumber, document.version);
     await this.postRender(
       candidates.length === 1
         ? ""
-        : `Showing candidate 1 of ${candidates.length.toLocaleString()} · use Go to choose another`,
+        : vscode.l10n.t("Showing candidate 1 of {0} · use Go to choose another", candidates.length.toLocaleString()),
     );
   }
 
@@ -409,63 +775,48 @@ export class JsonTreePanel {
   }
 
   private getHtml(webview: vscode.Webview): string {
-    const nonce = createNonce();
     const root = webviewRoot(this.services.extensionUri);
-    const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(root, "main.js"));
-    const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(root, "tree.css"));
-    const csp = [
-      "default-src 'none'",
-      `style-src ${webview.cspSource}`,
-      `script-src 'nonce-${nonce}'`,
-    ].join("; ");
-
-    return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="${csp}">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="stylesheet" href="${styleUri}">
-</head>
-<body>
-  <header>
-    <div class="header-main">
-      <span class="header-title" id="title"></span>
-      <span class="header-path" id="path"></span>
-      <span id="tree-operation-status" aria-live="polite"></span>
-      <span class="header-actions">
-        <button class="header-button" id="expand-all" type="button" title="Expand every object and array">Expand all</button>
-        <button class="header-button" id="collapse-all" type="button" title="Collapse the entire tree">Collapse all</button>
-      </span>
-    </div>
-    <div class="recovery-warning hidden" id="recovery-warning" role="status"></div>
-    <div class="jsonl-bar hidden" id="jsonl-bar" aria-label="JSONL navigation">
-      <button class="header-button" id="previous-jsonl" type="button" title="Previous valid JSON line">← Prev</button>
-      <button class="header-button" id="next-jsonl" type="button" title="Next valid JSON line">Next →</button>
-      <label class="jsonl-line-label" for="jsonl-line">Line</label>
-      <input id="jsonl-line" type="number" min="1" step="1" inputmode="numeric" aria-label="JSONL line number">
-      <span id="jsonl-total"></span>
-      <button class="header-button" id="go-jsonl" type="button">Go</button>
-      <button class="header-button" id="reveal-source" type="button" title="Reveal this record in the source file">Source</button>
-      <label class="follow-label"><input id="follow-cursor" type="checkbox"> Follow cursor</label>
-      <span id="jsonl-status" aria-live="polite"></span>
-    </div>
-    <div class="search-bar" role="search">
-      <input id="search-input" type="search" placeholder="Search keys and values…" aria-label="Search JSON keys and values" spellcheck="false" disabled>
-      <span id="search-scope-warning" class="hidden" title="Long keys and values are shortened in this view. Search covers the displayed prefix and suffix only; copy and open actions still use the complete host value.">Long values shortened · search is display-only</span>
-      <span id="search-count" aria-live="polite"></span>
-      <button class="header-button search-button" id="previous-match" type="button" title="Previous match (Shift+Enter)" disabled>↑</button>
-      <button class="header-button search-button" id="next-match" type="button" title="Next match (Enter)" disabled>↓</button>
-      <button class="header-button search-button" id="clear-search" type="button" title="Clear search (Escape)" disabled>×</button>
-    </div>
-  </header>
-  <main id="tree" role="tree" aria-label="JSON tree"></main>
-  <div id="empty-search" class="hidden">No matches</div>
-  <div id="menu" class="hidden" role="menu"></div>
-  <script nonce="${nonce}" src="${scriptUri}"></script>
-</body>
-</html>`;
+    return renderWebviewHtml({
+      nonce: createNonce(),
+      cspSource: webview.cspSource,
+      scriptUri: webview.asWebviewUri(vscode.Uri.joinPath(root, "main.js")).toString(),
+      styleUri: webview.asWebviewUri(vscode.Uri.joinPath(root, "tree.css")).toString(),
+      l10nBundle: vscode.l10n.bundle,
+      t: (message) => vscode.l10n.t(message),
+    });
   }
+}
+
+/**
+ * Parses JSON embedded in a string for inline display. Returns undefined when
+ * the user dismisses a picker and null when the value is not a container.
+ */
+async function decodeEmbeddedJson(
+  value: string,
+  maxValueNodes: number,
+  pick: (candidates: JsonCandidate[]) => Promise<JsonCandidate | undefined>,
+): Promise<JsonTreeDecoded | null | undefined> {
+  if (maxValueNodes < 1) throw new JsonValueNodeLimitError(Math.max(0, maxValueNodes));
+  const candidates = parseNestedJsonCandidates(
+    value,
+    Number.isFinite(maxValueNodes) ? { maxValueNodes } : {},
+  );
+  if (candidates.length === 0) return null;
+  const selected = candidates.length === 1 ? candidates[0] : await pick(candidates);
+  if (selected === undefined) return undefined;
+  if (selected.tree.type !== "object" && selected.tree.type !== "array") return null;
+  return {
+    root: selected.tree,
+    unwrapDepth: selected.unwrapDepth,
+    recovery: selected.recovery,
+  };
+}
+
+function webviewDecoded(decoded: JsonTreeDecoded): NonNullable<RenderMessage["root"]["decoded"]> {
+  const model = createJsonTreeWebviewModel(decoded.root);
+  return decoded.recovery === undefined
+    ? { root: model.root, unwrapDepth: decoded.unwrapDepth }
+    : { root: model.root, unwrapDepth: decoded.unwrapDepth, recovered: true };
 }
 
 /** Bundled Webview assets; also the only folder the Webview may load from. */
@@ -479,7 +830,7 @@ async function guardOutputSize(action: string, work: () => Promise<void>): Promi
     await work();
   } catch (error) {
     if (error instanceof JsonTreeOutputTooLargeError) {
-      void vscode.window.showErrorMessage(`Cannot ${action}: ${error.message}`);
+      void vscode.window.showErrorMessage(vscode.l10n.t("Cannot {0}: {1}", action, error.message));
       return;
     }
     throw error;
@@ -487,7 +838,7 @@ async function guardOutputSize(action: string, work: () => Promise<void>): Promi
 }
 
 function copyText(text: string, label: string): Promise<void> {
-  return guardOutputSize(`copy ${label}`, async () => {
+  return guardOutputSize(vscode.l10n.t("copy {0}", label), async () => {
     assertTransferTextSize(text);
     await vscode.env.clipboard.writeText(text);
   });
@@ -495,33 +846,57 @@ function copyText(text: string, label: string): Promise<void> {
 
 function copyPath(action: "copyJsonPath" | "copyJqPath", context: JsonTreeNodeContext): Promise<void> {
   if (context.hasDuplicateKeyInPath) {
-    const syntax = action === "copyJsonPath" ? "JSONPath" : "jq path";
-    void vscode.window.showWarningMessage(
-      `Cannot copy ${syntax}: this path passes through a duplicate object key and is ambiguous.`,
-    );
+    void vscode.window.showWarningMessage(action === "copyJsonPath"
+      ? vscode.l10n.t("Cannot copy JSONPath: this path passes through a duplicate object key and is ambiguous.")
+      : vscode.l10n.t("Cannot copy jq path: this path passes through a duplicate object key and is ambiguous."));
     return Promise.resolve();
   }
   const path = materializeJsonTreePath(context);
-  return guardOutputSize("copy path", async () => {
+  return guardOutputSize(vscode.l10n.t("copy path"), async () => {
     const text = action === "copyJsonPath" ? formatJsonPathForTransfer(path) : formatJqPathForTransfer(path);
     await vscode.env.clipboard.writeText(text);
-  });
-}
-
-function copyValue(node: JsonTreeNode): Promise<void> {
-  return guardOutputSize("copy value", async () => {
-    const serialized = stringifyJsonTreeForTransfer(node);
-    await vscode.env.clipboard.writeText(serialized.text);
-    if (serialized.compacted) {
+    if (action === "copyJsonPath" && isDecodedPath(path)) {
       void vscode.window.showInformationMessage(
-        "Copied compact JSON because pretty-formatted output would be too large.",
+        vscode.l10n.t("JSONPath cannot cross an encoded string, so the copied path is relative to the decoded JSON."),
+      );
+    }
+    let ancestor: JsonTreeNodeContext | undefined = context;
+    while (ancestor !== undefined && ancestor.decodedFrom?.recovery === undefined) ancestor = ancestor.parent;
+    if (action === "copyJqPath" && ancestor !== undefined) {
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t("This path crosses a recovered partial JSON string; jq's fromjson will reject the damaged original."),
       );
     }
   });
 }
 
+function copyValue(node: JsonTreeNode): Promise<void> {
+  return guardOutputSize(vscode.l10n.t("copy value"), async () => {
+    const serialized = stringifyJsonTreeForTransfer(node);
+    await vscode.env.clipboard.writeText(serialized.text);
+    if (serialized.compacted) {
+      void vscode.window.showInformationMessage(
+        vscode.l10n.t("Copied compact JSON because pretty-formatted output would be too large."),
+      );
+    }
+  });
+}
+
+/** Opens only http(s) links; VS Code still asks before opening untrusted domains. */
+async function openLink(value: string): Promise<void> {
+  const text = value.trim();
+  if (!/^https?:\/\/\S+$/i.test(text)) return;
+  let uri: vscode.Uri;
+  try {
+    uri = vscode.Uri.parse(text, true);
+  } catch {
+    return;
+  }
+  if (uri.scheme === "http" || uri.scheme === "https") await vscode.env.openExternal(uri);
+}
+
 function openDecodedValue(node: JsonTreeNode): Promise<void> {
-  return guardOutputSize("open decoded string", async () => {
+  return guardOutputSize(vscode.l10n.t("open decoded string"), async () => {
     const text = node.value as string;
     assertTransferTextSize(text);
     const document = await vscode.workspace.openTextDocument({ content: text, language: "plaintext" });
@@ -530,18 +905,18 @@ function openDecodedValue(node: JsonTreeNode): Promise<void> {
 }
 
 function openParsedJson(selected: JsonCandidate): Promise<void> {
-  return guardOutputSize("open parsed JSON", async () => {
+  return guardOutputSize(vscode.l10n.t("open parsed JSON"), async () => {
     const serialized = stringifyJsonTreeForTransfer(selected.tree);
     const document = await vscode.workspace.openTextDocument({ content: serialized.text, language: "json" });
     await vscode.window.showTextDocument(document, { preview: false, viewColumn: vscode.ViewColumn.Beside });
     if (selected.recovery) {
       void vscode.window.showWarningMessage(
-        "Opened a recovered JSON subset. Damaged or missing values were omitted; array indices refer to the recovered subset, not the original source.",
+        vscode.l10n.t("Opened a recovered JSON subset. Damaged or missing values were omitted; array indices refer to the recovered subset, not the original source."),
       );
     }
     if (serialized.compacted) {
       void vscode.window.showInformationMessage(
-        "Opened compact JSON because pretty-formatted output would be too large.",
+        vscode.l10n.t("Opened compact JSON because pretty-formatted output would be too large."),
       );
     }
   });

@@ -20,7 +20,9 @@ Nested JSON Tree is a read-only viewer for the JSON that ordinary formatters str
 
 ## Highlights
 
-- Open a JSON/JSONC document as a collapsible tree.
+- Open a JSON/JSONC document, a selection, or the clipboard as a collapsible tree.
+- Expand escaped JSON strings **inline**, level after level, without leaving the tree.
+- Keep the tree in sync with the editor: reveal any node in the source, highlight the node under the cursor, and refresh automatically as you edit.
 - Accept JSONC line/block comments and trailing commas.
 - Extract valid JSON even when unrelated text appears before or after it.
 - Navigate valid JSONL/NDJSON records in one Tree View without loading the whole document into the parser.
@@ -32,6 +34,8 @@ Nested JSON Tree is a read-only viewer for the JSON that ordinary formatters str
 - Copy lossless values, decoded strings, exact escaped string literals, JSONPath, and jq filters.
 - Choose between multiple detected JSON candidates.
 - Automatically expand small trees; keep large trees manageable.
+- See readable hints for Unix timestamps, color values, string lengths, and links.
+- English and Simplified Chinese UI, following VS Code's display language.
 
 ## Partial JSON recovery and expansion
 
@@ -43,7 +47,9 @@ Recovered trees display **Recovered partial JSON**; the picker labels them **rec
 
 ## Nested JSON
 
-Right-click any string node to open JSON encoded inside it. The new tree supports the same actions, so nesting can be explored repeatedly.
+Strings that contain a JSON object or array show an expand arrow. Click it (or press `→`) to decode the string **inline**: the parsed value appears as a **decoded JSON** child, double-encoded strings are unwrapped automatically, and the decoded value can contain further encoded strings. Search covers decoded content, and **Copy jq path** produces a runnable filter such as `.payload | fromjson | .user.id`. JSONPath cannot cross an encoded string, so it is copied relative to the decoded value.
+
+Right-click any string node to open its JSON in a separate tree instead. The new tree supports the same actions, so nesting can be explored repeatedly.
 
 <a href="assets/screenshots/nested-json-menu.png"><img src="assets/screenshots/nested-json-menu.png" width="1000" alt="Open escaped nested JSON"></a>
 
@@ -57,7 +63,18 @@ Place the cursor on a record and select **Nested JSON Tree: Open Current Line as
 
 The Tree View keeps the source URI and current line. Use **Prev**, **Next**, or a line number to jump between valid records in the same tab; empty, invalid, and resource-limited lines are skipped. **Source** reveals the current record in the editor. **Follow cursor** is optional and off by default.
 
-Editor context-menu entries appear only for JSON/JSONC and JSONL/NDJSON files. Both commands remain available through `Cmd+Shift+P` / `Ctrl+Shift+P` for text and log files.
+Editor context-menu entries appear only for JSON/JSONC and JSONL/NDJSON files. Both commands remain available through `Cmd+Shift+P` / `Ctrl+Shift+P` for text and log files. With **Follow cursor** on, the node under the cursor is also highlighted within the current line.
+
+## Selections, clipboard, and source sync
+
+Select any text — for example the JSON part of a log line or a multi-line block — and choose **Open Selection as Tree** from the editor context menu. **Open Clipboard as Tree** parses whatever you copied from a terminal or browser.
+
+Trees opened from a document or selection stay linked to it:
+
+- **Reveal in source** (context menu) selects the node's exact range in the editor. Inside decoded string content, it reveals the enclosing string.
+- **Sync with editor** (on by default) highlights the node under the editor cursor without taking keyboard focus.
+- Document trees re-parse automatically about half a second after you stop typing, keeping expansion, inline-decoded strings, search, and scroll position. If the document temporarily has no valid JSON, the last valid tree stays visible. Documents above 2 million characters show **Refresh** instead of re-parsing on every edit.
+- A selection's range cannot follow edits, so a selection tree is unlinked once its document changes.
 
 ## Installation
 
@@ -79,6 +96,8 @@ code --install-extension nested-json-tree-<version>.vsix
 | --- | --- |
 | `Nested JSON Tree: Open Document as Tree` | Extract and open JSON from the active document. |
 | `Nested JSON Tree: Open Current Line as Tree` | Extract and open JSON from the cursor's line. |
+| `Nested JSON Tree: Open Selection as Tree` | Extract and open JSON from the selected text (also in the editor context menu whenever text is selected). |
+| `Nested JSON Tree: Open Clipboard as Tree` | Extract and open JSON from the clipboard. |
 
 ## Tree controls
 
@@ -91,6 +110,7 @@ code --install-extension nested-json-tree-<version>.vsix
 - Keyboard: `↑`/`↓` move between rows, `→`/`←` expand/collapse or move to the child/parent, `Home`/`End` jump to the first/last row, `Enter`/`Space` toggle a container or open the actions menu.
 - Expansion, search text, and scroll position are restored when you return to a hidden Tree View tab.
 - String-node actions can open parsed JSON or open the decoded value unchanged as plain text.
+- Hover a value for hints: Unix timestamps in seconds or milliseconds show their UTC and local time (inline as well, when the key looks like a time such as `createdAt` or `ts`); strings show their length; colors such as `#3b82f6` or `rgb(…)` get a swatch; `Cmd`/`Ctrl`+click opens an `http(s)` link.
 
 Example jq path:
 

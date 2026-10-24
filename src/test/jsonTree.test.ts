@@ -10,6 +10,7 @@ import {
   createJsonTreeWebviewModel,
   isValidJsonTreeNodeId,
   jsonTreeToValue,
+  looksLikeEmbeddedJson,
   materializeJsonTreePath,
   measureJsonTreeString,
   stringifyJsonTree,
@@ -177,4 +178,102 @@ test("rejects serialized and raw transfer text above the absolute output limit",
   const root: JsonTreeNode = { id: 0, type: "string", raw: '"123456789"', value: "123456789" };
   assert.throws(() => stringifyJsonTreeForTransfer(root, 5, 8), JsonTreeOutputTooLargeError);
   assert.throws(() => assertTransferTextSize("123456789", 8), JsonTreeOutputTooLargeError);
+});
+
+// --- Source offsets, inline decoded JSON, and structural paths ---------------
+
+function decodedFrom(source: string) {
+  return { root: parseLosslessly(source), unwrapDepth: 0 };
+}
+
+test("records source ranges for values and object keys", () => {
+  const source = '{"a": [1, {"b": "x"}]}';
+  const root = parseLosslessly(source);
+  const array = root.children![0];
+  assert.equal(source.slice(array.keyOffset, array.keyOffset! + 3), '"a"');
+  assert.equal(source.slice(array.value.offset, array.value.offset! + array.value.length!), '[1, {"b": "x"}]');
+  const x = array.value.children![1].value.children![0].value;
+  assert.equal(source.slice(x.offset, x.offset! + x.length!), '"x"');
+});
+
+test("finds the deepest node at a source offset, treating keys as part of their property", () => {
+  const source = '{"user": {"id": 7, "tags": ["a", "b"]}, "ok": true}';
+  const root = parseLosslessly(source);
+  const index = buildJsonTreeContextIndex(root);
+  const at = (needle: string, delta = 0) => index.nodeAtOffset(source.indexOf(needle) + delta);
+  assert.equal(at("7")?.raw, "7");
+  assert.equal(at('"id"', 1)?.raw, "7", "a key resolves to its value");
+  assert.equal(at('"b"')?.raw, '"b"');
+  assert.equal(at('["a"')?.type, "array");
+  assert.equal(at(", \"ok\"")?.type, "object", "separators resolve to the enclosing container");
+  assert.equal(at("true")?.raw, "true");
+  assert.equal(index.nodeAtOffset(-1), undefined);
+  assert.equal(index.nodeAtOffset(source.length), undefined);
+});
+
+test("attaches decoded JSON with fresh IDs, parent links, and decode path segments", () => {
+  const root = parseLosslessly('{"payload": "{\\"user\\": {\\"id\\": 7}}", "same": 1, "same": 2}');
+  const index = buildJsonTreeContextIndex(root);
+  const payload = root.children![0].value;
+  const firstFreeId = index.nextId;
+  const decoded = decodedFrom('{"user": {"id": 7}}');
+  index.attachDecoded(payload.id, decoded);
+
+  assert.equal(payload.decoded, decoded);
+  assert.equal(decoded.root.id, firstFreeId);
+  assert.equal(decoded.root.offset, undefined, "decoded content has no source range");
+  const id = decoded.root.children![0].value.children![0].value;
+  const context = index.get(id.id)!;
+  assert.deepEqual(materializeJsonTreePath(context), ["payload", { decode: 1 }, "user", "id"]);
+  assert.equal(index.get(decoded.root.id)?.decodedFrom, decoded);
+  assert.equal(context.hasDuplicateKeyInPath, false);
+  assert.deepEqual(index.ancestry(id.id), [root.id, payload.id, decoded.root.id, decoded.root.children![0].value.id, id.id]);
+  assert.throws(() => index.attachDecoded(payload.id, decodedFrom("[1]")), /already decoded/);
+  assert.throws(() => index.attachDecoded(root.id, decodedFrom("[1]")), /not a string/);
+});
+
+test("structural paths survive re-parsing and cross decoded boundaries", () => {
+  const source = '{"a": 1, "payload": "[10, 20]"}';
+  const first = parseLosslessly(source);
+  const firstIndex = buildJsonTreeContextIndex(first);
+  firstIndex.attachDecoded(first.children![1].value.id, decodedFrom("[10, 20]"));
+  const twenty = first.children![1].value.decoded!.root.children![1].value;
+  const path = firstIndex.structuralPath(twenty.id)!;
+
+  const second = parseLosslessly(source);
+  const secondIndex = buildJsonTreeContextIndex(second);
+  assert.equal(secondIndex.resolveStructuralPath(path), undefined, "not decoded yet");
+  secondIndex.attachDecoded(second.children![1].value.id, decodedFrom("[10, 20]"));
+  assert.equal(secondIndex.resolveStructuralPath(path)?.raw, "20");
+});
+
+test("rebuilding an index includes previously attached decoded content", () => {
+  const root = parseLosslessly('{"payload": "[1]"}');
+  buildJsonTreeContextIndex(root).attachDecoded(root.children![0].value.id, decodedFrom("[1]"));
+  const rebuilt = buildJsonTreeContextIndex(root);
+  const one = root.children![0].value.decoded!.root.children![0].value;
+  assert.equal(rebuilt.get(one.id)?.node, one);
+  assert.equal(rebuilt.size, 4);
+});
+
+test("Webview models flag decodable strings and carry decoded content", () => {
+  const root = parseLosslessly('{"a": "{\\"x\\":1}", "b": " [1] ", "c": "\\"{\\\\\\"y\\\\\\":2}\\"", "d": "{x", "e": "plain"}');
+  const model = createJsonTreeWebviewModel(root).root;
+  assert.deepEqual(model.children!.map((child) => child.value.decodable === true), [true, true, true, false, false]);
+  buildJsonTreeContextIndex(root).attachDecoded(root.children![0].value.id, decodedFrom('{"x":1}'));
+  const decodedModel = createJsonTreeWebviewModel(root).root.children![0].value;
+  assert.equal(decodedModel.decodable, undefined);
+  assert.equal(decodedModel.decoded?.root.children?.[0].key, "x");
+  // Copy/serialize output is unaffected by attached decoded content.
+  assert.equal(stringifyJsonTree(root, 0), '{"a":"{\\"x\\":1}","b":" [1] ","c":"\\"{\\\\\\"y\\\\\\":2}\\"","d":"{x","e":"plain"}');
+});
+
+test("embedded JSON detection is a cheap whole-value bracket check", () => {
+  assert.equal(looksLikeEmbeddedJson('{"a":1}'), true);
+  assert.equal(looksLikeEmbeddedJson("\n [1, 2] \t"), true);
+  assert.equal(looksLikeEmbeddedJson('"{\\"a\\":1}"'), true);
+  assert.equal(looksLikeEmbeddedJson("{}"), true);
+  for (const value of ["", "{", "[1", "text {1}", '"plain"', "1", "{x} y"]) {
+    assert.equal(looksLikeEmbeddedJson(value), false, value);
+  }
 });

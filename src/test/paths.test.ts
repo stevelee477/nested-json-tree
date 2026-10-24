@@ -10,6 +10,7 @@ import {
   formatJsonPath,
   formatJsonPathForDisplay,
   formatJsonPathForTransfer,
+  isDecodedPath,
 } from "../paths";
 
 test("formats the root as a jq identity filter", () => {
@@ -91,4 +92,29 @@ test("bounds long multi-segment display paths with an explicit omission marker",
   assert.ok(display.startsWith("$.aaaa"));
   assert.ok(display.endsWith("zzzzzz"));
   assert.match(display, /path shortened/);
+});
+
+test("jq paths cross decoded strings with fromjson, once per encoding layer", () => {
+  assert.equal(formatJqPath(["payload", { decode: 1 }, "user", "id"]), '.payload | fromjson | .user.id');
+  assert.equal(formatJqPath(["payload", { decode: 1 }]), ".payload | fromjson");
+  assert.equal(formatJqPath([0, { decode: 2 }, "a-b"]), '.[0] | fromjson | fromjson | .["a-b"]');
+  assert.equal(formatJqPathForTransfer(["p", { decode: 1 }, 0, { decode: 1 }, "x"]), ".p | fromjson | .[0] | fromjson | .x");
+});
+
+test("JSONPath for a decoded node is relative to the innermost decoded value", () => {
+  assert.equal(isDecodedPath(["payload", { decode: 1 }, "user"]), true);
+  assert.equal(isDecodedPath(["payload", "user"]), false);
+  assert.equal(formatJsonPath(["payload", { decode: 1 }, "user", 0]), "$.user[0]");
+  assert.equal(formatJsonPathForTransfer(["payload", { decode: 1 }]), "$");
+});
+
+test("display paths show each decoded boundary", () => {
+  assert.equal(formatJsonPathForDisplay(["payload", { decode: 1 }, "user"]), "$.payload ⟩ $.user");
+});
+
+test("measured jq output for decoded paths matches the formatted length", () => {
+  const path = ["payload", { decode: 2 }, "k e y", 3] as const;
+  const text = formatJqPath([...path]);
+  assert.equal(formatJqPathForTransfer([...path], text.length), text);
+  assert.throws(() => formatJqPathForTransfer([...path], text.length - 1), JsonTreeOutputTooLargeError);
 });
