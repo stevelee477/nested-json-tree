@@ -21,16 +21,28 @@ new_repository() {
     git -C "$repository_dir" -c commit.gpgsign=false commit --quiet --allow-empty -m 'base'
 }
 
+commit_with_identity() {
+  local repository_dir="$1"
+  local author="$2"
+  local committer="$3"
+  shift 3
+
+  env \
+    GIT_AUTHOR_NAME="${author% <*}" \
+    GIT_AUTHOR_EMAIL="$(sed -E 's/.*<(.*)>/\1/' <<<"$author")" \
+    GIT_COMMITTER_NAME="${committer% <*}" \
+    GIT_COMMITTER_EMAIL="$(sed -E 's/.*<(.*)>/\1/' <<<"$committer")" \
+    git -C "$repository_dir" -c commit.gpgsign=false commit --quiet --allow-empty "$@"
+}
+
+readonly PROJECT_IDENTITY='stevelee477 <hi.whoareyou12@gmail.com>'
+readonly DEPENDABOT_IDENTITY='dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>'
+readonly GITHUB_MERGE_IDENTITY='GitHub <noreply@github.com>'
+
 commit_as_github_bot() {
   local repository_dir="$1"
   shift
-
-  env \
-    GIT_AUTHOR_NAME='dependabot[bot]' \
-    GIT_AUTHOR_EMAIL="49699333+dependabot[bot]@users.noreply.github.com" \
-    GIT_COMMITTER_NAME='GitHub' \
-    GIT_COMMITTER_EMAIL="noreply@github.com" \
-    git -C "$repository_dir" -c commit.gpgsign=false commit --quiet --allow-empty "$@"
+  commit_with_identity "$repository_dir" "$DEPENDABOT_IDENTITY" "$GITHUB_MERGE_IDENTITY" "$@"
 }
 
 expect_pass() {
@@ -90,10 +102,30 @@ env \
   git -C "$allowed_bot_repo" -c tag.gpgSign=false tag -a v-test -m 'valid annotated tag'
 expect_pass 'GitHub bot remote branch' "$allowed_bot_repo"
 
-strict_main_repo="$test_root/strict-main"
-new_repository "$strict_main_repo"
-commit_as_github_bot "$strict_main_repo" -m 'bot identity on strict main'
-expect_failure 'Strict main identity' "$strict_main_repo" 'Commit identity policy violation.'
+dependabot_main_repo="$test_root/dependabot-main"
+new_repository "$dependabot_main_repo"
+commit_as_github_bot "$dependabot_main_repo" -m 'Dependabot update merged on GitHub'
+commit_with_identity "$dependabot_main_repo" "$DEPENDABOT_IDENTITY" "$PROJECT_IDENTITY" -m 'Dependabot update re-committed locally'
+expect_pass 'Dependabot merges on main' "$dependabot_main_repo"
+
+other_bot_main_repo="$test_root/other-bot-main"
+new_repository "$other_bot_main_repo"
+commit_with_identity "$other_bot_main_repo" \
+  'github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>' "$GITHUB_MERGE_IDENTITY" \
+  -m 'other bot identity on strict main'
+expect_failure 'Other bot on strict main' "$other_bot_main_repo" 'Commit identity policy violation.'
+
+spoofed_bot_main_repo="$test_root/spoofed-bot-main"
+new_repository "$spoofed_bot_main_repo"
+commit_with_identity "$spoofed_bot_main_repo" \
+  'dependabot[bot] <12345+dependabot[bot]@users.noreply.github.com>' "$GITHUB_MERGE_IDENTITY" \
+  -m 'Dependabot name with another account email'
+expect_failure 'Spoofed Dependabot on strict main' "$spoofed_bot_main_repo" 'Commit identity policy violation.'
+
+web_merge_main_repo="$test_root/web-merge-main"
+new_repository "$web_merge_main_repo"
+commit_with_identity "$web_merge_main_repo" "$PROJECT_IDENTITY" "$GITHUB_MERGE_IDENTITY" -m 'project commit merged on GitHub'
+expect_failure 'Project commit with GitHub committer' "$web_merge_main_repo" 'Commit identity policy violation.'
 
 external_email_repo="$test_root/external-email"
 new_repository "$external_email_repo"
@@ -156,7 +188,9 @@ expect_failure 'Tagger line forged after malformed headers' "$fake_tagger_repo" 
 replace_ref_repo="$test_root/replace-ref"
 new_repository "$replace_ref_repo"
 replace_base="$(git -C "$replace_ref_repo" rev-parse HEAD)"
-commit_as_github_bot "$replace_ref_repo" -m 'strict commit hidden by replacement'
+commit_with_identity "$replace_ref_repo" \
+  'github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>' "$GITHUB_MERGE_IDENTITY" \
+  -m 'strict commit hidden by replacement'
 replaced_commit="$(git -C "$replace_ref_repo" rev-parse HEAD)"
 replace_tree="$(git -C "$replace_ref_repo" rev-parse 'HEAD^{tree}')"
 replacement_commit="$(printf '%s\n' 'replacement with expected identity' \

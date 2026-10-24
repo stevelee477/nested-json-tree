@@ -6,6 +6,10 @@ export GIT_NO_REPLACE_OBJECTS=1
 
 readonly EXPECTED_NAME="stevelee477"
 readonly EXPECTED_EMAIL="hi.whoareyou12@gmail.com"
+readonly DEPENDABOT_NAME="dependabot[bot]"
+readonly DEPENDABOT_EMAIL="49699333+dependabot[bot]@users.noreply.github.com"
+readonly GITHUB_MERGE_NAME="GitHub"
+readonly GITHUB_MERGE_EMAIL="noreply@github.com"
 readonly OFFICIAL_NPM_HOST="registry.npmjs.org"
 # Keep denied identifiers encoded so the audit policy does not leak the
 # private values in its own tracked source.
@@ -49,6 +53,27 @@ is_allowed_commit_identity() {
   local email="$2"
 
   [[ "$name" == "$EXPECTED_NAME" && "$email" == "$EXPECTED_EMAIL" ]] || is_allowed_github_noreply_email "$email"
+}
+
+is_project_identity() {
+  [[ "$1" == "$EXPECTED_NAME" && "$2" == "$EXPECTED_EMAIL" ]]
+}
+
+# Release-bearing history accepts exactly the project identity, plus Dependabot
+# updates merged on GitHub (or re-committed locally by the project identity).
+is_allowed_strict_commit() {
+  local author_name="$1"
+  local author_email="$2"
+  local committer_name="$3"
+  local committer_email="$4"
+
+  if is_project_identity "$author_name" "$author_email"; then
+    is_project_identity "$committer_name" "$committer_email"
+    return
+  fi
+  [[ "$author_name" == "$DEPENDABOT_NAME" && "$author_email" == "$DEPENDABOT_EMAIL" ]] || return 1
+  [[ "$committer_name" == "$GITHUB_MERGE_NAME" && "$committer_email" == "$GITHUB_MERGE_EMAIL" ]] ||
+    is_project_identity "$committer_name" "$committer_email"
 }
 
 is_allowed_content_email() {
@@ -254,8 +279,9 @@ npm_file_kind() {
 }
 
 # Full-history CI checkouts include automated remote branches. Keep exact
-# project identity on release-bearing history while allowing GitHub noreply
-# identities only on commits reachable exclusively from other refs.
+# project identity (or a Dependabot merge) on release-bearing history while
+# allowing GitHub noreply identities only on commits reachable exclusively
+# from other refs.
 strict_history_refs=()
 for ref in refs/heads/main refs/remotes/origin/main; do
   if git show-ref --verify --quiet "$ref"; then
@@ -286,10 +312,7 @@ while IFS= read -r commit; do
   committer_email="$(git show -s --format='%ce' "$commit" 2>/dev/null)"
 
   if grep -Fqx -- "$commit" "$strict_history_commits"; then
-    if [[ "$author_name" != "$EXPECTED_NAME"
-        || "$author_email" != "$EXPECTED_EMAIL"
-        || "$committer_name" != "$EXPECTED_NAME"
-        || "$committer_email" != "$EXPECTED_EMAIL" ]]; then
+    if ! is_allowed_strict_commit "$author_name" "$author_email" "$committer_name" "$committer_email"; then
       commit_identity_issues=$((commit_identity_issues + 1))
     fi
   elif ! is_allowed_commit_identity "$author_name" "$author_email" || ! is_allowed_commit_identity "$committer_name" "$committer_email"; then
