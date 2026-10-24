@@ -121,6 +121,7 @@ export function createWebviewHarness(
     "sync-cursor",
     "refresh-source",
     "source-status",
+    "search-decoded",
   ];
   const elements = new Map(elementIds.map((id) => [id, new FakeElement()]));
   if (l10nBundle !== undefined) {

@@ -90,6 +90,16 @@ export interface DecodeFailedMessage {
   nodeId: number;
 }
 
+/** Strings decoded so search can cover them; owners are nodes the Webview already has. */
+export interface DecodedBatchMessage {
+  type: "decodedBatch";
+  renderKey: number;
+  items: Array<{ nodeId: number; decoded: NonNullable<JsonTreeWebviewNode["decoded"]> }>;
+  decodedCount: number;
+  /** A string or node budget stopped decoding early. */
+  limited: boolean;
+}
+
 /** Expands every ancestor and highlights the node; IDs run from the root down. */
 export interface RevealNodeMessage {
   type: "revealNode";
@@ -102,6 +112,7 @@ export type HostToWebviewMessage =
   | SourceStateMessage
   | DecodedMessage
   | DecodeFailedMessage
+  | DecodedBatchMessage
   | RevealNodeMessage;
 
 export type WebviewToHostMessage =
@@ -110,5 +121,6 @@ export type WebviewToHostMessage =
   | { type: "setFollowCursor"; enabled: boolean }
   | { type: "setSyncCursor"; enabled: boolean }
   | { type: "refreshSource" }
+  | { type: "decodeAllForSearch"; renderKey: number }
   | { type: "revealSource" | "previousJsonl" | "nextJsonl" }
   | { type: "goToJsonlLine"; lineNumber: number };

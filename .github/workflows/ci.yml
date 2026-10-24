@@ -36,6 +36,8 @@ jobs:
       - run: npm audit --audit-level=critical
       - run: npm run lint
       - run: npm test
+      # Real Chrome (preinstalled on GitHub-hosted runners) under the production CSP.
+      - run: npm run test:browser
       - name: Test in VS Code Extension Host
         run: xvfb-run -a npm run test:integration
         env:

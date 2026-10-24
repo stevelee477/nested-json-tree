@@ -13,10 +13,14 @@ async function main(): Promise<void> {
     ...(vscodeExecutablePath === undefined ? { version } : { vscodeExecutablePath }),
     launchArgs: [
       // A locale needs its language pack, so a locale run uses a dedicated
-      // extensions folder that contains only that pack.
+      // extensions folder that contains only that pack, plus its own user
+      // data folder where VS Code records installed language packs.
       ...(process.env.VSCODE_TEST_EXTENSIONS_DIR === undefined
         ? ["--disable-extensions"]
-        : ["--extensions-dir", process.env.VSCODE_TEST_EXTENSIONS_DIR]),
+        : [
+            `--extensions-dir=${process.env.VSCODE_TEST_EXTENSIONS_DIR}`,
+            `--user-data-dir=${process.env.VSCODE_TEST_EXTENSIONS_DIR}-user-data`,
+          ]),
       ...(process.env.VSCODE_TEST_LOCALE === undefined ? [] : [`--locale=${process.env.VSCODE_TEST_LOCALE}`]),
     ],
   });

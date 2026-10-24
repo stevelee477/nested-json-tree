@@ -32,6 +32,90 @@ export async function run(): Promise<void> {
   await verifySelectionRevealAndCursorSync(api);
   await verifyLiveRefreshKeepsInlineDecodedJson(api);
   await verifyOpenClipboardCommand(api);
+  await verifySelectionTracksEdits(api);
+  await verifyJsonlLineTracksEdits(api);
+  await verifyEmbeddedJsonAndSearchDecoding(api);
+}
+
+/** Polls a fresh handle for the newest panel with this title. */
+function poll(api: ExtensionTestApi, title: string, ready: (panel: PanelTestHandle) => boolean, description: string) {
+  return waitFor(() => {
+    const panel = newestPanel(api, title);
+    return panel !== undefined && ready(panel) ? panel : undefined;
+  }, description);
+}
+
+async function verifySelectionTracksEdits(api: ExtensionTestApi): Promise<void> {
+  const content = 'header\nlog {"value": 42} tail\n';
+  const document = await vscode.workspace.openTextDocument({ language: "plaintext", content });
+  const editor = await vscode.window.showTextDocument(document, { preview: false });
+  const start = content.indexOf("{");
+  editor.selection = new vscode.Selection(document.positionAt(start), document.positionAt(content.indexOf("}") + 1));
+  await vscode.commands.executeCommand("nestedJsonTree.openSelection");
+  const title = treeTitle("Untitled", 2);
+  await poll(api, title, () => true, "the selection panel");
+
+  // An edit above the selection only shifts it; the tree stays linked.
+  await editor.edit((edit) => edit.insert(new vscode.Position(0, 0), "new first line\n"));
+  let panel = await poll(api, title, (current) => current.parsedVersion === document.version, "the selection to follow an edit above it");
+  await panel.runNodeAction("revealInSource", childValue(panel.tree, "value").id);
+  const active = await waitFor(() => vscode.window.activeTextEditor?.document === document ? vscode.window.activeTextEditor : undefined, "the source editor");
+  assert.equal(document.getText(active.selection), "42");
+
+  // An edit inside the selection re-parses just the selection.
+  const before = panel.renderVersion;
+  const valueOffset = document.getText().indexOf("42");
+  await active.edit((edit) => edit.replace(new vscode.Range(document.positionAt(valueOffset), document.positionAt(valueOffset + 2)), "1234"));
+  panel = await poll(api, title, (current) => current.renderVersion > before, "the selection to re-parse");
+  assert.equal(childValue(panel.tree, "value").raw, "1234");
+
+  // An edit across the selection boundary unlinks it.
+  const braceOffset = document.getText().indexOf("{");
+  await active.edit((edit) => edit.delete(new vscode.Range(document.positionAt(braceOffset - 2), document.positionAt(braceOffset + 2))));
+  await poll(api, title, (current) => current.parsedVersion === undefined, "the selection to unlink");
+}
+
+async function verifyJsonlLineTracksEdits(api: ExtensionTestApi): Promise<void> {
+  const document = await vscode.workspace.openTextDocument({ language: "plaintext", content: '{"i":0}\n{"i":1}\n{"i":2}\n' });
+  const editor = await vscode.window.showTextDocument(document, { preview: false });
+  editor.selection = new vscode.Selection(2, 0, 2, 0);
+  await vscode.commands.executeCommand("nestedJsonTree.openCurrentLine");
+  await poll(api, treeTitle("Untitled", 3), () => true, "the JSONL panel");
+
+  await editor.edit((edit) => edit.insert(new vscode.Position(0, 0), '{"i":-1}\n'));
+  let panel = await poll(api, treeTitle("Untitled", 4), (current) => current.lineNumber === 3, "the record to move down a line");
+  assert.equal(panel.parsedVersion, document.version);
+  assert.equal(childValue(panel.tree, "i").raw, "2", "the tree is unchanged");
+
+  const before = panel.renderVersion;
+  await editor.edit((edit) => edit.replace(new vscode.Range(3, 5, 3, 6), "5"));
+  panel = await poll(api, treeTitle("Untitled", 4), (current) => current.renderVersion > before, "the edited record to re-parse");
+  assert.equal(childValue(panel.tree, "i").raw, "5");
+
+  await editor.edit((edit) => edit.delete(new vscode.Range(2, 0, 4, 0)));
+  await poll(api, treeTitle("Untitled", 3), (current) => current.parsedVersion === undefined, "a deleted record to unlink");
+}
+
+async function verifyEmbeddedJsonAndSearchDecoding(api: ExtensionTestApi): Promise<void> {
+  const content = JSON.stringify({
+    message: 'retrying: {"attempt": 2} after timeout',
+    layers: JSON.stringify({ inner: JSON.stringify({ deep: true }) }),
+  });
+  const document = await vscode.workspace.openTextDocument({ language: "json", content });
+  await vscode.window.showTextDocument(document, { preview: false });
+  await vscode.commands.executeCommand("nestedJsonTree.openDocument");
+  const panel = await poll(api, treeTitle("Untitled"), (current) => childValue(current.tree, "message").decoded === undefined, "the embedded-JSON panel");
+
+  const message = childValue(panel.tree, "message");
+  await panel.runNodeAction("expandDecoded", message.id);
+  assert.equal(message.decoded?.embedded, true, "JSON inside text is flagged as embedded");
+  assert.equal(childValue(message.decoded!.root, "attempt").raw, "2");
+
+  await panel.postFromWebview({ type: "decodeAllForSearch", renderKey: panel.renderVersion });
+  const layers = childValue(panel.tree, "layers");
+  const inner = childValue(layers.decoded!.root, "inner");
+  assert.equal(layers.decoded?.embedded, undefined);
+  assert.equal(childValue(inner.decoded!.root, "deep").raw, "true", "decoding for search follows nested strings");
 }
 
 /** Expected panel title in the active display language. */

@@ -7,6 +7,11 @@
 - Linked document and selection trees to their source: **Reveal in source** selects a node's exact range, **Sync with editor** highlights the node under the cursor, and document trees refresh automatically after edits while keeping expansion, inline decoding, search, and scroll position. JSONL **Follow cursor** also highlights the node under the cursor.
 - Added value hints for Unix timestamps (seconds and milliseconds), color swatches, string lengths, and `Cmd`/`Ctrl`+click links.
 - Localized the UI, commands, and settings into Simplified Chinese.
+- Selection trees follow edits outside the selection and re-parse after edits inside it; JSONL trees follow their record when lines above change.
+- Auto-refresh now stops at 500,000 characters by default (`nestedJsonTree.liveRefreshMaxCharacters`) and waits longer for larger text.
+- Strings that carry JSON inside other text can be decoded inline too, marked **decoded JSON (from text)**.
+- Added a search option that decodes every embedded-JSON string before searching, within fixed budgets.
+- Added `examples/demo.log`, real-browser Webview tests in CI, a screenshot generator, and a `npm run demo` scene for VS Code screenshots.
 
 ## 0.7.0
 

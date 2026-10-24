@@ -60,6 +60,8 @@ export interface JsonTreeDecoded {
   /** Extra string-decoding passes beyond the first (double-encoded JSON). */
   unwrapDepth: number;
   recovery?: JsonRecovery;
+  /** The JSON was extracted from surrounding text, so `fromjson` cannot reproduce it. */
+  embedded?: true;
 }
 
 /** Host-owned node/edge context. Webview messages identify only the node ID. */
@@ -105,7 +107,7 @@ export interface JsonTreeWebviewNode {
   children?: JsonTreeWebviewChild[];
   /** The string value looks like embedded JSON and can be decoded inline. */
   decodable?: true;
-  decoded?: { root: JsonTreeWebviewNode; unwrapDepth: number; recovered?: true };
+  decoded?: { root: JsonTreeWebviewNode; unwrapDepth: number; recovered?: true; embedded?: true };
 }
 
 export interface JsonTreeWebviewModel {
@@ -433,8 +435,17 @@ export function materializeJsonTreePath(
   return path;
 }
 
-/** Cheap pre-check: does a decoded string value look like one embedded JSON container? */
+/**
+ * Cheap pre-check: does a decoded string value hold a JSON container, either
+ * as the whole value or inside surrounding text such as `data: {"id": 1}`? The
+ * surrounding-text form needs a strong signal (an object key or an array of
+ * objects/strings) so ordinary prose with brackets is not offered.
+ */
 export function looksLikeEmbeddedJson(value: string): boolean {
+  return looksLikeWholeJson(value) || /\{\s*"[^"\n]{0,200}"\s*:|\[\s*[{"]/.test(value);
+}
+
+function looksLikeWholeJson(value: string): boolean {
   let start = 0;
   let end = value.length - 1;
   while (start <= end && isJsonWhitespace(value.charCodeAt(start))) start += 1;
@@ -500,6 +511,7 @@ export function createJsonTreeWebviewModel(
         const decodedRoot = copyNode(node.decoded.root);
         target.decoded = { root: decodedRoot, unwrapDepth: node.decoded.unwrapDepth };
         if (node.decoded.recovery !== undefined) target.decoded.recovered = true;
+        if (node.decoded.embedded) target.decoded.embedded = true;
         pending.push({ source: node.decoded.root, target: decodedRoot });
       } else if (looksLikeEmbeddedJson(node.value)) {
         target.decodable = true;

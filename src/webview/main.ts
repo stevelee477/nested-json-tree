@@ -22,6 +22,7 @@ interface SavedViewState {
   expanded: number[];
   query: string;
   scrollTop: number;
+  searchDecoded?: boolean;
 }
 
 interface EdgeInfo {
@@ -50,7 +51,7 @@ interface TreeNodeElement extends HTMLDivElement {
   applySearchState(isExactMatch: boolean, isMatchBranch: boolean): void;
   restoreSearchState(): boolean;
   openMenu(): void;
-  attachDecoded(decoded: NonNullable<JsonTreeWebviewNode["decoded"]>): void;
+  attachDecoded(decoded: NonNullable<JsonTreeWebviewNode["decoded"]>, expand?: boolean): void;
   markNotDecodable(): void;
 }
 
@@ -86,6 +87,7 @@ const sourceBar = byId<HTMLElement>("source-bar");
 const syncCursorInput = byId<HTMLInputElement>("sync-cursor");
 const refreshSourceButton = byId<HTMLButtonElement>("refresh-source");
 const sourceStatus = byId<HTMLElement>("source-status");
+const searchDecodedButton = byId<HTMLButtonElement>("search-decoded");
 let rootNode: TreeNodeElement | undefined;
 let currentRoot: JsonTreeWebviewNode | undefined;
 let renderKey = -1;
@@ -110,6 +112,12 @@ const renderedNodes = new Map<number, TreeNodeElement>();
 /** Expansion outside search mode; search-driven expansion is never persisted. */
 const expandedIds = new Set<number>();
 let persistScheduled = false;
+/** Search asks the Host to decode every embedded-JSON string first. */
+let searchDecoded = false;
+/** Render key whose strings were already requested for decoding. */
+let decodeRequestedFor = -1;
+/** Shown in the tree status area whenever no tree operation is reporting progress. */
+let stickyStatus = "";
 const MATERIALIZE_CHILD_CHUNK_SIZE = 200;
 const TREE_OPERATION_CHUNK_SIZE = 200;
 
@@ -130,6 +138,9 @@ window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) =
       return;
     case "revealNode":
       revealNode(message.ids);
+      return;
+    case "decodedBatch":
+      applyDecodedBatch(message);
       return;
     case "render":
       render(message);
@@ -167,6 +178,7 @@ function render(message: RenderMessage): void {
   matchRows = [];
   activeMatchIndex = -1;
   cursorRow = undefined;
+  stickyStatus = "";
   searchCount.textContent = "";
   previousMatchButton.disabled = true;
   nextMatchButton.disabled = true;
@@ -206,6 +218,7 @@ function render(message: RenderMessage): void {
   const restore = snapshot !== undefined
     ? { query: searchInput.value, expanded: resolveStructuralPaths(snapshot.expandedPaths), scrollTop: snapshot.scrollTop }
     : saved;
+  if (saved?.searchDecoded !== undefined) setSearchDecoded(saved.searchDecoded);
   if (restore) {
     searchInput.value = restore.query;
     restoreExpansion(new Set(restore.expanded), () => {
@@ -259,6 +272,11 @@ revealSourceButton.addEventListener("click", () => vscode.postMessage({ type: "r
 followCursorInput.addEventListener("change", () => vscode.postMessage({ type: "setFollowCursor", enabled: followCursorInput.checked }));
 syncCursorInput?.addEventListener("change", () => vscode.postMessage({ type: "setSyncCursor", enabled: syncCursorInput.checked }));
 refreshSourceButton?.addEventListener("click", () => vscode.postMessage({ type: "refreshSource" }));
+searchDecodedButton?.addEventListener("click", () => {
+  setSearchDecoded(!searchDecoded);
+  schedulePersist();
+  if (searchInput.value.trim()) runSearch();
+});
 tree.addEventListener("keydown", handleTreeKeydown);
 tree.addEventListener("scroll", schedulePersist);
 menu.addEventListener("keydown", handleMenuKeydown);
@@ -291,6 +309,11 @@ function runSearch(): void {
   nextMatchButton.disabled = true;
   emptySearch.classList.add("hidden");
   updateActionButtons();
+  if (searchDecoded && decodeRequestedFor !== renderKey && hasDecodableString(currentRoot)) {
+    decodeRequestedFor = renderKey;
+    stickyStatus = t("Decoding embedded JSON for search…");
+    vscode.postMessage({ type: "decodeAllForSearch", renderKey });
+  }
   const state = createJsonTreeSearchState(currentRoot, query);
   const processChunk = (): void => {
     if (requestId !== latestSearchRequest || !searchActive) return;
@@ -529,6 +552,55 @@ function toggleNodeManually(node: TreeNodeElement): void {
   );
 }
 
+function setSearchDecoded(enabled: boolean): void {
+  searchDecoded = enabled;
+  if (!searchDecodedButton) return;
+  searchDecodedButton.classList.toggle("active", enabled);
+  searchDecodedButton.setAttribute("aria-pressed", String(enabled));
+}
+
+function hasDecodableString(root: JsonTreeWebviewNode): boolean {
+  const pending = [root];
+  while (pending.length > 0) {
+    const model = pending.pop() as JsonTreeWebviewNode;
+    if (model.decodable) return true;
+    if (model.decoded) pending.push(model.decoded.root);
+    for (const child of model.children || []) pending.push(child.value);
+  }
+  return false;
+}
+
+/** Attaches strings the Host decoded for search, then searches again. */
+function applyDecodedBatch(message: Extract<HostToWebviewMessage, { type: "decodedBatch" }>): void {
+  if (message.renderKey !== renderKey || currentRoot === undefined) return;
+  const models = new Map<number, JsonTreeWebviewNode>();
+  const pending = [currentRoot];
+  while (pending.length > 0) {
+    const model = pending.pop() as JsonTreeWebviewNode;
+    models.set(model.id, model);
+    if (model.decoded) pending.push(model.decoded.root);
+    for (const child of model.children || []) pending.push(child.value);
+  }
+  for (const item of message.items) {
+    const model = models.get(item.nodeId);
+    if (model === undefined || model.decoded !== undefined) continue;
+    const rendered = renderedNodes.get(item.nodeId);
+    if (rendered) {
+      rendered.attachDecoded(item.decoded, false);
+    } else {
+      model.decoded = item.decoded;
+      delete model.decodable;
+    }
+  }
+  stickyStatus = message.limited
+    ? t("Decoded {0} strings for search (limit reached)", message.decodedCount.toLocaleString())
+    : message.decodedCount === 1
+      ? t("Decoded 1 string for search")
+      : t("Decoded {0} strings for search", message.decodedCount.toLocaleString());
+  updateActionButtons();
+  if (searchInput.value.trim()) runSearch();
+}
+
 /** Asks the Host to parse a string's embedded JSON; the reply attaches it inline. */
 function requestDecode(node: TreeNodeElement): void {
   if (!node.decodable) return;
@@ -540,7 +612,7 @@ function updateActionButtons(): void {
   expandAllButton.disabled = searchActive || treeOperationRunning || !expandAllAllowed;
   collapseAllButton.disabled = false;
   searchInput.disabled = false;
-  if (!treeOperationRunning) treeOperationStatus.textContent = "";
+  if (!treeOperationRunning) treeOperationStatus.textContent = stickyStatus;
 }
 
 function applyJsonlState(state: JsonlViewState): void {
@@ -635,7 +707,9 @@ function createNode(
   const childNodes: TreeNodeElement[] = [];
   const childModels = (): Array<{ label: string; model: JsonTreeWebviewNode; edge: EdgeInfo }> => {
     if (model.decoded !== undefined) {
-      const label = model.decoded.recovered ? t("decoded JSON (recovered)") : t("decoded JSON");
+      const label = model.decoded.recovered
+        ? t("decoded JSON (recovered)")
+        : model.decoded.embedded ? t("decoded JSON (from text)") : t("decoded JSON");
       return [{ label, model: model.decoded.root, edge: { hasKey: false, hasRawKey: false, decoded: true } }];
     }
     return (model.children || []).map((child) => ({
@@ -760,7 +834,7 @@ function createNode(
     const rect = row.getBoundingClientRect();
     showMenu((rect as DOMRect).left ?? 0, (rect as DOMRect).bottom ?? 0, model, edgeInfo, node, true);
   };
-  node.attachDecoded = (decoded) => {
+  node.attachDecoded = (decoded, expand = true) => {
     row.classList.remove("decoding");
     if (expandable) return;
     // Mutating the shared model keeps search and later renders consistent.
@@ -769,8 +843,9 @@ function createNode(
     node.decodable = false;
     expandable = true;
     modelChildren = childModels();
-    if (searchActive) node.revealChildrenInSearch();
     updateToggle();
+    if (!expand) return;
+    if (searchActive) node.revealChildrenInSearch();
     // Opening a string shows the decoded value's top level, not just its root row.
     if (ensureExpanded(() => true, () => {}, true)) {
       childNodes[0]?.ensureExpanded(() => true, () => {}, true);
@@ -1162,6 +1237,7 @@ function schedulePersist(): void {
       expanded: [...expandedIds],
       query: searchInput.value,
       scrollTop: tree.scrollTop,
+      searchDecoded,
     } satisfies SavedViewState);
   }, 250);
 }

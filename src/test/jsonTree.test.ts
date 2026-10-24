@@ -273,7 +273,13 @@ test("embedded JSON detection is a cheap whole-value bracket check", () => {
   assert.equal(looksLikeEmbeddedJson("\n [1, 2] \t"), true);
   assert.equal(looksLikeEmbeddedJson('"{\\"a\\":1}"'), true);
   assert.equal(looksLikeEmbeddedJson("{}"), true);
-  for (const value of ["", "{", "[1", "text {1}", '"plain"', "1", "{x} y"]) {
+  for (const value of ["", "{", "[1", "text {1}", '"plain"', "1", "{x} y", "see [1] and {2}", "array [] here"]) {
     assert.equal(looksLikeEmbeddedJson(value), false, value);
+  }
+});
+
+test("embedded JSON detection accepts strong signals inside surrounding text", () => {
+  for (const value of ['data: {"id": 1}', 'got {"a":1} from upstream', 'rows=[{"x":1}]', 'tags: ["a", "b"] end']) {
+    assert.equal(looksLikeEmbeddedJson(value), true, value);
   }
 });

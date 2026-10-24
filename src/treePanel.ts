@@ -39,6 +39,7 @@ import {
 import {
   describeLimitError,
   getAutoExpandMaxNodes,
+  getLiveRefreshMaxCharacters,
   getParseOptions,
   reportUnexpectedError,
 } from "./settings";
@@ -48,14 +49,20 @@ import {
   shouldAutoExpandTree,
 } from "./treeOptions";
 import { findJsonlRecord } from "./jsonlNavigator";
+import { TextChange, countLineBreaks, trackLine, trackRange } from "./editTracking";
 import { renderWebviewHtml } from "./webviewHtml";
 
 export const VIEW_TYPE = "nestedJsonTree.viewer";
 
-/** Larger documents are not re-parsed on every edit; the panel offers Refresh. */
-const LIVE_REFRESH_MAX_CHARACTERS = 2_000_000;
-const LIVE_REFRESH_DELAY_MS = 400;
 const CURSOR_SYNC_DELAY_MS = 100;
+/** Budgets for decoding every embedded-JSON string so search can cover it. */
+const MAX_SEARCH_DECODED_STRINGS = 2_000;
+const MAX_SEARCH_DECODED_NODES = 200_000;
+
+/** Waits longer before re-parsing larger text; about 0.3 s plus 1 ms per 2,000 characters. */
+function liveRefreshDelay(characters: number): number {
+  return 300 + Math.min(1_000, Math.round(characters / 2_000));
+}
 
 /** Webviews whose bundled script has started; exposed to integration tests. */
 let readyWebviewCount = 0;
@@ -71,7 +78,10 @@ export interface PanelTestHandle {
   parsedVersion: number | undefined;
   tree: JsonTreeNode;
   lastSyncedNodeId: number | undefined;
+  lineNumber: number | undefined;
   runNodeAction(action: NodeAction, nodeId: number): Promise<void>;
+  /** Delivers a message as if the Webview had sent it. */
+  postFromWebview(message: unknown): Promise<void>;
 }
 
 const openPanels = new Set<JsonTreePanel>();
@@ -94,6 +104,8 @@ export interface DocumentSource {
   scope: "document" | "selection";
   /** Document offset of the parsed text (0 for a whole document). */
   baseOffset: number;
+  /** End offset of a selection; tracked through edits outside it. */
+  endOffset?: number;
   /** Document version the tree was parsed from. */
   version: number;
 }
@@ -195,6 +207,8 @@ export class JsonTreePanel {
       parsedVersion: this.parsedVersion,
       tree: this.candidate.tree,
       lastSyncedNodeId: this.lastSyncedNodeId,
+      lineNumber: this.jsonlSource?.lineNumber,
+      postFromWebview: (message) => this.handleMessage(message),
       runNodeAction: async (action, nodeId) => {
         const context = this.index.get(nodeId);
         if (context === undefined) throw new Error(`Unknown node ${nodeId}.`);
@@ -271,6 +285,10 @@ export class JsonTreePanel {
       return;
     }
 
+    if (message.type === "decodeAllForSearch") {
+      if (message.renderKey === this.renderVersion) await this.decodeAllForSearch();
+      return;
+    }
     if (await this.handleJsonlMessage(message)) return;
     if (await this.handleSourceMessage(message)) return;
 
@@ -403,6 +421,72 @@ export class JsonTreePanel {
     }
     this.index.attachDecoded(node.id, decoded);
     await this.post({ type: "decoded", nodeId: node.id, decoded: webviewDecoded(decoded) });
+  }
+
+  /**
+   * Decodes every string that looks like embedded JSON, breadth-first so
+   * strings inside newly decoded content are included, within fixed budgets.
+   * Yields between strings so a large tree never blocks the Extension Host.
+   */
+  private async decodeAllForSearch(): Promise<void> {
+    const renderVersion = this.renderVersion;
+    const isCurrent = (): boolean => renderVersion === this.renderVersion;
+    const pending: JsonTreeNode[] = [];
+    const queueStrings = (root: JsonTreeNode): void => walkJsonTree(root, (node) => {
+      if (node.type === "string" && node.decoded === undefined && looksLikeEmbeddedJson(node.value as string)) {
+        pending.push(node);
+      }
+    });
+    queueStrings(this.candidate.tree);
+    const newRoots = new Set<number>();
+    const owners: JsonTreeNode[] = [];
+    let addedNodes = 0;
+    let limited = false;
+    for (let index = 0; index < pending.length; index += 1) {
+      if (owners.length >= MAX_SEARCH_DECODED_STRINGS) {
+        limited = true;
+        break;
+      }
+      if (index % 50 === 49) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        if (!isCurrent()) return;
+      }
+      const node = pending[index];
+      if (node.decoded !== undefined) continue;
+      const budget = Math.min(this.remainingNodeBudget(), MAX_SEARCH_DECODED_NODES - addedNodes);
+      let decoded: JsonTreeDecoded | null | undefined;
+      try {
+        decoded = budget >= 1 ? await decodeEmbeddedJson(node.value as string, budget, async (all) => all[0]) : undefined;
+      } catch (error) {
+        if (!(error instanceof JsonProcessingLimitError)) throw error;
+        limited = true;
+        continue;
+      }
+      if (budget < 1) {
+        limited = true;
+        break;
+      }
+      if (!decoded) continue;
+      this.index.attachDecoded(node.id, decoded);
+      newRoots.add(decoded.root.id);
+      owners.push(node);
+      walkJsonTree(decoded.root, () => {
+        addedNodes += 1;
+      });
+      queueStrings(decoded.root);
+    }
+    if (!isCurrent()) return;
+    // Owners inside other newly decoded content arrive as part of that content.
+    const items = owners
+      .filter((owner) => !this.index.ancestry(owner.id).some((id) => newRoots.has(id)))
+      .map((owner) => ({ nodeId: owner.id, decoded: webviewDecoded(owner.decoded as JsonTreeDecoded) }));
+    await this.post({
+      type: "decodedBatch",
+      renderKey: renderVersion,
+      items,
+      decodedCount: owners.length,
+      limited,
+    });
   }
 
   private remainingNodeBudget(): number {
@@ -636,43 +720,102 @@ export class JsonTreePanel {
     if (uri === undefined || event.contentChanges.length === 0 || event.document.uri.toString() !== uri.toString()) {
       return;
     }
-    if (this.refreshTimer !== undefined) clearTimeout(this.refreshTimer);
-
+    const changes: TextChange[] = event.contentChanges.map((change) => ({
+      rangeOffset: change.rangeOffset,
+      rangeLength: change.rangeLength,
+      textLength: change.text.length,
+      startLine: change.range.start.line,
+      endLine: change.range.end.line,
+      insertedLineBreaks: countLineBreaks(change.text),
+    }));
+    const document = event.document;
     const source = this.source;
-    if (source?.scope === "selection") {
-      // A selection's offsets cannot be tracked through edits.
-      this.parsedVersion = undefined;
-      source.status = vscode.l10n.t("The source changed; this selection tree is no longer linked to it.");
-      void this.postSourceState();
+    const jsonl = this.jsonlSource;
+
+    if (jsonl !== undefined) {
+      const update = trackLine(jsonl.lineNumber, changes);
+      if (update.kind === "unchanged") return;
+      const linked = this.parsedVersion !== undefined;
+      jsonl.lineNumber = update.line;
+      jsonl.lineCount = document.lineCount;
+      this.title = vscode.l10n.t("JSON Tree · {0}:{1}", jsonl.sourceName, update.line + 1);
+      this.pathLabel = vscode.l10n.t("$ · line {0}", update.line + 1);
+      this.panel.title = this.title;
+      if (update.kind === "deleted" || update.line >= document.lineCount) {
+        this.parsedVersion = undefined;
+        void this.postJsonlState(vscode.l10n.t("This record's line was deleted; showing the last parsed version"));
+        return;
+      }
+      if (update.kind === "shifted") {
+        // Same text on a new line: the tree stays valid for reveal and sync.
+        if (linked) this.parsedVersion = document.version;
+        void this.postJsonlState("");
+        return;
+      }
+      this.scheduleRefresh(document.lineAt(update.line).text.length);
       return;
     }
-    if (source !== undefined && event.document.getText().length > LIVE_REFRESH_MAX_CHARACTERS) {
-      source.status = vscode.l10n.t("The source changed.");
-      source.canRefresh = true;
+
+    if (source?.scope === "selection") {
+      if (source.endOffset === undefined) return;
+      const update = trackRange(source.baseOffset, source.endOffset, changes);
+      if (update.kind === "lost") {
+        source.endOffset = undefined;
+        this.parsedVersion = undefined;
+        source.status = vscode.l10n.t("An edit crossed the selection's boundary; this tree is no longer linked to the source.");
+        void this.postSourceState();
+        return;
+      }
+      const linked = this.parsedVersion !== undefined;
+      source.baseOffset = update.start;
+      source.endOffset = update.end;
+      if (update.kind === "shifted") {
+        if (linked) this.parsedVersion = document.version;
+        return;
+      }
+      this.scheduleRefresh(update.end - update.start);
+      return;
+    }
+
+    this.scheduleRefresh(document.getText().length);
+  }
+
+  private scheduleRefresh(characters: number): void {
+    if (this.refreshTimer !== undefined) clearTimeout(this.refreshTimer);
+    if (this.source !== undefined && characters > getLiveRefreshMaxCharacters()) {
+      this.parsedVersion = undefined;
+      this.source.status = vscode.l10n.t("The source changed.");
+      this.source.canRefresh = true;
       void this.postSourceState();
       return;
     }
     this.refreshTimer = setTimeout(() => {
       this.refreshFromSource(false).catch((error: unknown) =>
         reportUnexpectedError(vscode.l10n.t("Refresh"), error));
-    }, LIVE_REFRESH_DELAY_MS);
+    }, liveRefreshDelay(characters));
   }
 
   /**
-   * Re-parses the same scope (whole document or JSONL line), keeps the most
-   * similar candidate, re-attaches inline-decoded strings, and preserves the
-   * Webview's expansion by structure.
+   * Re-parses the same scope (whole document, tracked selection, or JSONL
+   * line), keeps the most similar candidate, re-attaches inline-decoded
+   * strings, and preserves the Webview's expansion by structure.
    */
   private async refreshFromSource(requested: boolean): Promise<void> {
     const uri = this.sourceUri();
-    if (uri === undefined || this.source?.scope === "selection") return;
+    if (uri === undefined) return;
+    const source = this.source;
+    if (source?.scope === "selection" && source.endOffset === undefined) return;
     const generation = ++this.navigationGeneration;
     const document = await vscode.workspace.openTextDocument(uri);
     if (generation !== this.navigationGeneration) return;
 
     const jsonl = this.jsonlSource;
     if (jsonl !== undefined && jsonl.lineNumber >= document.lineCount) return;
-    const text = jsonl !== undefined ? document.lineAt(jsonl.lineNumber).text : document.getText();
+    const text = jsonl !== undefined
+      ? document.lineAt(jsonl.lineNumber).text
+      : source?.scope === "selection"
+        ? document.getText(new vscode.Range(document.positionAt(source.baseOffset), document.positionAt(source.endOffset as number)))
+        : document.getText();
     const keepLast = vscode.l10n.t("showing the last valid version");
     let candidates: JsonCandidate[];
     try {
@@ -805,18 +948,38 @@ async function decodeEmbeddedJson(
   const selected = candidates.length === 1 ? candidates[0] : await pick(candidates);
   if (selected === undefined) return undefined;
   if (selected.tree.type !== "object" && selected.tree.type !== "array") return null;
-  return {
+  const decoded: JsonTreeDecoded = {
     root: selected.tree,
     unwrapDepth: selected.unwrapDepth,
     recovery: selected.recovery,
   };
+  if (!isWholeDecodedValue(value, selected)) decoded.embedded = true;
+  return decoded;
+}
+
+/** True when `fromjson`, applied once per layer, yields exactly this candidate. */
+function isWholeDecodedValue(value: string, candidate: JsonCandidate): boolean {
+  let layer = value;
+  for (let depth = 0; depth < candidate.unwrapDepth; depth += 1) {
+    try {
+      const parsed: unknown = JSON.parse(layer);
+      if (typeof parsed !== "string") return false;
+      layer = parsed;
+    } catch {
+      return false;
+    }
+  }
+  return layer.trim() === candidate.raw;
 }
 
 function webviewDecoded(decoded: JsonTreeDecoded): NonNullable<RenderMessage["root"]["decoded"]> {
-  const model = createJsonTreeWebviewModel(decoded.root);
-  return decoded.recovery === undefined
-    ? { root: model.root, unwrapDepth: decoded.unwrapDepth }
-    : { root: model.root, unwrapDepth: decoded.unwrapDepth, recovered: true };
+  const result: NonNullable<RenderMessage["root"]["decoded"]> = {
+    root: createJsonTreeWebviewModel(decoded.root).root,
+    unwrapDepth: decoded.unwrapDepth,
+  };
+  if (decoded.recovery !== undefined) result.recovered = true;
+  if (decoded.embedded) result.embedded = true;
+  return result;
 }
 
 /** Bundled Webview assets; also the only folder the Webview may load from. */
@@ -860,11 +1023,18 @@ function copyPath(action: "copyJsonPath" | "copyJqPath", context: JsonTreeNodeCo
         vscode.l10n.t("JSONPath cannot cross an encoded string, so the copied path is relative to the decoded JSON."),
       );
     }
-    let ancestor: JsonTreeNodeContext | undefined = context;
-    while (ancestor !== undefined && ancestor.decodedFrom?.recovery === undefined) ancestor = ancestor.parent;
-    if (action === "copyJqPath" && ancestor !== undefined) {
+    if (action !== "copyJqPath") return;
+    const crossed: JsonTreeDecoded[] = [];
+    for (let ancestor: JsonTreeNodeContext | undefined = context; ancestor; ancestor = ancestor.parent) {
+      if (ancestor.decodedFrom !== undefined) crossed.push(ancestor.decodedFrom);
+    }
+    if (crossed.some((decoded) => decoded.recovery !== undefined)) {
       void vscode.window.showWarningMessage(
         vscode.l10n.t("This path crosses a recovered partial JSON string; jq's fromjson will reject the damaged original."),
+      );
+    } else if (crossed.some((decoded) => decoded.embedded)) {
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t("This path crosses a string with text around its JSON; jq's fromjson cannot parse that string as is."),
       );
     }
   });
@@ -927,6 +1097,7 @@ interface PanelMessage {
   nodeId?: unknown;
   lineNumber?: unknown;
   enabled?: unknown;
+  renderKey?: unknown;
 }
 
 function isPanelMessage(value: unknown): value is PanelMessage {

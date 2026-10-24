@@ -37,6 +37,8 @@ Nested JSON Tree is a read-only viewer for the JSON that ordinary formatters str
 - See readable hints for Unix timestamps, color values, string lengths, and links.
 - English and Simplified Chinese UI, following VS Code's display language.
 
+<a href="assets/screenshots/zh-cn.png"><img src="assets/screenshots/zh-cn.png" width="760" alt="Simplified Chinese Tree View with its actions menu"></a>
+
 ## Partial JSON recovery and expansion
 
 Damaged input such as `{"id":7,"broken":undefined,"ok":true}` can retain the confirmed `id` and `ok` fields. Missing commas or closing delimiters are handled on a best-effort basis. Incomplete strings, malformed numbers such as `01` / `1e`, and invalid escapes are omitted rather than guessed; single-quoted or unquoted keys are not converted into JSON. Multiple JSON values on one line are listed separately, including mixtures of complete and recoverable values.
@@ -48,6 +50,10 @@ Recovered trees display **Recovered partial JSON**; the picker labels them **rec
 ## Nested JSON
 
 Strings that contain a JSON object or array show an expand arrow. Click it (or press `→`) to decode the string **inline**: the parsed value appears as a **decoded JSON** child, double-encoded strings are unwrapped automatically, and the decoded value can contain further encoded strings. Search covers decoded content, and **Copy jq path** produces a runnable filter such as `.payload | fromjson | .user.id`. JSONPath cannot cross an encoded string, so it is copied relative to the decoded value.
+
+<a href="assets/screenshots/inline-decoding.png"><img src="assets/screenshots/inline-decoding.png" width="760" alt="Escaped JSON strings decoded inline, with timestamp and color hints"></a>
+
+Strings that carry JSON inside other text, such as `retrying: {"attempt": 2}`, can be expanded too; they are labeled **decoded JSON (from text)**, and a copied jq path warns that `fromjson` cannot parse such a string as is. Turn on **{}** in the search bar to decode every embedded-JSON string before searching (up to 2,000 strings per tree).
 
 Right-click any string node to open its JSON in a separate tree instead. The new tree supports the same actions, so nesting can be explored repeatedly.
 
@@ -73,8 +79,9 @@ Trees opened from a document or selection stay linked to it:
 
 - **Reveal in source** (context menu) selects the node's exact range in the editor. Inside decoded string content, it reveals the enclosing string.
 - **Sync with editor** (on by default) highlights the node under the editor cursor without taking keyboard focus.
-- Document trees re-parse automatically about half a second after you stop typing, keeping expansion, inline-decoded strings, search, and scroll position. If the document temporarily has no valid JSON, the last valid tree stays visible. Documents above 2 million characters show **Refresh** instead of re-parsing on every edit.
-- A selection's range cannot follow edits, so a selection tree is unlinked once its document changes.
+- Document trees re-parse automatically about half a second after you stop typing, keeping expansion, inline-decoded strings, search, and scroll position. If the document temporarily has no valid JSON, the last valid tree stays visible. Text above 500,000 characters (`nestedJsonTree.liveRefreshMaxCharacters`) shows **Refresh** instead of re-parsing on every edit.
+- A selection tree follows edits outside the selection and re-parses after edits inside it; an edit across its boundary unlinks it.
+- A JSONL tree follows its record when lines are inserted or removed above it, re-parses when the record itself is edited, and stops following if the line is deleted.
 
 ## Installation
 
@@ -123,6 +130,7 @@ Example jq path:
 | Setting | Default | Description |
 | --- | ---: | --- |
 | `nestedJsonTree.autoExpandMaxNodes` | `200` | Fully expand trees at or below this node count. Set to `0` to disable automatic descendant expansion; roots above the 10,000-node materialization limit remain collapsed. |
+| `nestedJsonTree.liveRefreshMaxCharacters` | `500000` | Re-parse document and selection trees automatically after edits up to this many characters; larger text shows **Refresh**. `0` always refreshes manually. |
 | `nestedJsonTree.maxValueNodes` | `500000` | Maximum JSON value nodes parsed for one document or tree (10,000–5,000,000). Each million nodes uses roughly 250 MB of Extension Host memory. |
 
 ## Parsing boundaries
@@ -147,7 +155,7 @@ npm run test:integration
 npm run package
 ```
 
-`npm run watch` rebuilds the extension and Webview bundles on change. Press `F5` in VS Code to launch an Extension Development Host. Synthetic screenshot data lives in [`examples/`](examples/).
+`npm run watch` rebuilds the extension and Webview bundles on change. `npm run demo` opens VS Code with a scripted scene from [`examples/demo.log`](examples/demo.log), and `npm run screenshots` regenerates the Webview screenshots in Chrome. Press `F5` in VS Code to launch an Extension Development Host. Synthetic screenshot data lives in [`examples/`](examples/).
 
 ## Contributing
 

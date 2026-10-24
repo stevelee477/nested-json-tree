@@ -1,0 +1,6 @@
+2026-09-01T10:00:00.000Z INFO  gateway  request accepted {"requestId":"req_demo_4096","path":"/api/orders","docs":"https://example.com/docs/orders"}
+2026-09-01T10:00:00.120Z DEBUG checkout payload={"orderId":"ORD-4096","body":"{\"id\":\"ORD-4096\",\"createdAt\":1788256800,\"items\":[{\"sku\":\"KEYBOARD-75\",\"qty\":1,\"color\":\"#3b82f6\"},{\"sku\":\"CABLE-USB-C\",\"qty\":2,\"color\":\"rgb(234, 88, 12)\"}],\"trace\":\"{\\\"span\\\":\\\"checkout.submit\\\",\\\"startedAtMs\\\":1788256800123,\\\"tags\\\":[\\\"demo\\\",\\\"synthetic\\\"]}\"}"}
+2026-09-01T10:00:00.250Z WARN  payments retrying: {"attempt": 2, "backoffMs": 250} after upstream timeout
+2026-09-01T10:00:00.400Z INFO  payments response {"status":200,"body":"\"{\\\"approved\\\":true,\\\"authCode\\\":\\\"DEMO-77\\\"}\""}
+2026-09-01T10:00:00.510Z ERROR notifier truncated record {"event":"email.queued","template":"order-confirmation","to":
+2026-09-01T10:00:00.600Z INFO  ui theme {"theme":{"primary":"#0ea5e9","accent":"hsl(32, 95%, 44%)","updatedAt":1788256800}}

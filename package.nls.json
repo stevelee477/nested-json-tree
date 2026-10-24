@@ -5,5 +5,6 @@
   "command.openSelection.title": "Open Selection as Tree",
   "command.openClipboard.title": "Open Clipboard as Tree",
   "config.autoExpandMaxNodes": "Automatically expand every object and array when the JSON contains at most this many value nodes. Set to `0` to disable automatic descendant expansion. Roots above the 10,000-node materialization limit remain collapsed.",
-  "config.maxValueNodes": "Maximum number of JSON value nodes (objects, arrays, and primitives) parsed for one tree or document. Larger values use more Extension Host memory — roughly 250 MB per million nodes."
+  "config.maxValueNodes": "Maximum number of JSON value nodes (objects, arrays, and primitives) parsed for one tree or document. Larger values use more Extension Host memory — roughly 250 MB per million nodes.",
+  "config.liveRefreshMaxCharacters": "Trees opened from a document re-parse automatically after edits while the parsed text has at most this many characters; larger text shows a **Refresh** button instead. Set to `0` to always refresh manually."
 }

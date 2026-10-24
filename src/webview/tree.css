@@ -157,3 +157,8 @@ header {
   border-radius: 2px;
 }
 .row.cursor-match { box-shadow: inset 2px 0 0 var(--vscode-focusBorder); background: var(--vscode-editor-selectionHighlightBackground, var(--vscode-list-inactiveSelectionBackground)); }
+.search-button.active {
+  color: var(--vscode-inputOption-activeForeground, var(--vscode-foreground));
+  background: var(--vscode-inputOption-activeBackground, var(--vscode-button-secondaryHoverBackground));
+  border-color: var(--vscode-inputOption-activeBorder, var(--vscode-focusBorder));
+}

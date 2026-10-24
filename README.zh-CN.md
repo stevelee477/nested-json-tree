@@ -38,9 +38,15 @@ Nested JSON Tree 专门处理普通格式化工具不擅长的 JSON：日志行�
 - 为 Unix 时间戳、颜色值、字符串长度和链接显示提示。
 - 界面支持英文和简体中文，跟随 VS Code 的显示语言。
 
+<a href="assets/screenshots/zh-cn.png"><img src="assets/screenshots/zh-cn.png" width="760" alt="简体中文界面的 Tree View 与操作菜单"></a>
+
 ## 嵌套 JSON
 
 内容是 JSON 对象或数组的字符串前面会显示展开箭头。点击它（或按 `→`）即可**原地解码**：解析结果显示为一个“解码后的 JSON”子节点，多重编码会自动逐层解开，解码出的值里如果还有编码字符串，也可以继续展开。搜索会覆盖已解码的内容；**复制 jq 路径**会生成可直接运行的过滤器，例如 `.payload | fromjson | .user.id`。JSONPath 无法跨越编码字符串，因此复制的是相对于解码值的路径。
+
+<a href="assets/screenshots/inline-decoding.png"><img src="assets/screenshots/inline-decoding.png" width="760" alt="原地解码转义的 JSON 字符串，并显示时间戳和颜色提示"></a>
+
+JSON 前后带有其他文字的字符串（比如 `retrying: {"attempt": 2}`）也可以展开，节点会标注为“解码后的 JSON（从文本中提取）”；复制它下面的 jq 路径时会提示 `fromjson` 无法直接解析这种字符串。打开搜索栏的 **{}** 按钮后，会在搜索前解码所有内嵌 JSON 的字符串（每棵树最多 2,000 个）。
 
 也可以右键字符串节点，在单独的 Tree View 中打开其中的 JSON。新打开的 Tree View 支持相同操作，因此可以继续逐层深入。
 
@@ -66,8 +72,9 @@ Tree View 会保留源文件地址和当前行号。可以用 **Prev**、**Next*
 
 - 右键菜单中的**在源文件中定位**会在编辑器中选中该节点的准确范围；对已解码的字符串内容，会定位到外层的字符串。
 - **与编辑器同步**（默认开启）会高亮编辑器光标处的节点，不会抢走键盘焦点。
-- 文档树会在停止输入约半秒后自动重新解析，并保留展开状态、已原地解码的字符串、搜索和滚动位置。文档暂时没有有效 JSON 时，继续显示上一个有效版本。超过 200 万字符的文档不会每次编辑都重新解析，而是显示**刷新**按钮。
-- 选中内容的范围无法跟随编辑，因此文档修改后，由选中内容生成的树会取消关联。
+- 文档树会在停止输入约半秒后自动重新解析，并保留展开状态、已原地解码的字符串、搜索和滚动位置。文档暂时没有有效 JSON 时，继续显示上一个有效版本。超过 50 万字符（`nestedJsonTree.liveRefreshMaxCharacters`）的文本不会每次编辑都重新解析，而是显示**刷新**按钮。
+- 由选中内容生成的树会跟随选区外的编辑，选区内被编辑后重新解析；编辑跨过选区边界时取消关联。
+- JSONL 树会在上方插入或删除行时跟随所在的记录，记录本身被编辑时重新解析，所在行被删除后停止跟随。
 
 ## 不完整 JSON 与展开性能
 
@@ -124,6 +131,7 @@ jq 路径示例：
 | 设置项 | 默认值 | 说明 |
 | --- | ---: | --- |
 | `nestedJsonTree.autoExpandMaxNodes` | `200` | 节点数不超过此值时自动完全展开；设为 `0` 时禁用后代自动展开，超过 10,000 个节点的根节点仍保持折叠。 |
+| `nestedJsonTree.liveRefreshMaxCharacters` | `500000` | 文档树和选区树在不超过这么多字符时，编辑后自动重新解析；更大的文本显示**刷新**按钮。`0` 表示始终手动刷新。 |
 | `nestedJsonTree.maxValueNodes` | `500000` | 单个文档或树最多解析的 JSON 值节点数（10,000–5,000,000）。每百万节点约占用 250 MB Extension Host 内存。 |
 
 ## 解析边界
@@ -148,7 +156,7 @@ npm run test:integration
 npm run package
 ```
 
-`npm run watch` 会在文件变化时重新构建扩展和 Webview bundle。在 VS Code 中按 `F5` 启动 Extension Development Host。截图使用的虚构数据位于 [`examples/`](examples/)。
+`npm run watch` 会在文件变化时重新构建扩展和 Webview bundle。`npm run demo` 会打开 VS Code 并用 [`examples/demo.log`](examples/demo.log) 布置好演示场景，`npm run screenshots` 会在 Chrome 中重新生成 Webview 截图。在 VS Code 中按 `F5` 启动 Extension Development Host。截图使用的虚构数据位于 [`examples/`](examples/)。
 
 ## 参与贡献
 

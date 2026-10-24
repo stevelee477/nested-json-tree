@@ -101,7 +101,10 @@ async function openSelection(): Promise<void> {
     ? String(selection.start.line + 1)
     : `${selection.start.line + 1}–${selection.end.line + 1}`;
   await parseAndOpen(text, vscode.l10n.t("JSON Tree · {0}:{1}", sourceName, lines), vscode.l10n.t("the selection"), {
-    source: documentSource(document, "selection", document.offsetAt(selection.start)),
+    source: {
+      ...documentSource(document, "selection", document.offsetAt(selection.start)),
+      endOffset: document.offsetAt(selection.end),
+    },
   });
 }
 

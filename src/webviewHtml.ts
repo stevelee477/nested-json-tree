@@ -62,6 +62,7 @@ export function renderWebviewHtml(options: WebviewHtmlOptions): string {
       <input id="search-input" type="search" placeholder="${t("Search keys and values…")}" aria-label="${t("Search JSON keys and values")}" spellcheck="false" disabled>
       <span id="search-scope-warning" class="hidden" title="${t("Long keys and values are shortened in this view. Search covers the displayed prefix and suffix only; copy and open actions still use the complete host value.")}">${t("Long values shortened · search is display-only")}</span>
       <span id="search-count" aria-live="polite"></span>
+      <button class="header-button search-button" id="search-decoded" type="button" aria-pressed="false" title="${t("Also search inside encoded JSON strings")}">{}</button>
       <button class="header-button search-button" id="previous-match" type="button" title="${t("Previous match (Shift+Enter)")}" disabled>↑</button>
       <button class="header-button search-button" id="next-match" type="button" title="${t("Next match (Enter)")}" disabled>↓</button>
       <button class="header-button search-button" id="clear-search" type="button" title="${t("Clear search (Escape)")}" disabled>×</button>

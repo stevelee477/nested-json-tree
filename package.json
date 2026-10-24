@@ -61,6 +61,13 @@
           "minimum": 10000,
           "maximum": 5000000,
           "markdownDescription": "%config.maxValueNodes%"
+        },
+        "nestedJsonTree.liveRefreshMaxCharacters": {
+          "type": "integer",
+          "default": 500000,
+          "minimum": 0,
+          "maximum": 20000000,
+          "markdownDescription": "%config.liveRefreshMaxCharacters%"
         }
       }
     },
@@ -143,6 +150,9 @@
     "typecheck": "tsc -p ./ --noEmit",
     "lint": "eslint .",
     "test": "npm run compile && node --test out/test/*.test.js",
+    "test:browser": "npm run compile && node --test --test-concurrency=1 out/browser/*.test.js",
+    "screenshots": "npm run compile && node scripts/screenshots.cjs",
+    "demo": "npm run compile && node out/integration/demo.js",
     "test:integration": "npm run compile && node out/integration/runTest.js",
     "package": "vsce package --no-dependencies"
   },
@@ -154,6 +164,7 @@
     "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.28.2",
     "eslint": "^10.13.0",
+    "playwright-core": "^1.64.1",
     "typescript": "^5.9.0",
     "typescript-eslint": "^8.72.0"
   },

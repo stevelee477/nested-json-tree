@@ -18,6 +18,11 @@ export function getParseOptions(): JsonParseOptions {
   };
 }
 
+/** Documents above this size show Refresh instead of re-parsing on every edit; 0 disables. */
+export function getLiveRefreshMaxCharacters(): number {
+  return vscode.workspace.getConfiguration(SECTION).get<number>("liveRefreshMaxCharacters", 500_000);
+}
+
 export function getAutoExpandMaxNodes(): number {
   return vscode.workspace.getConfiguration(SECTION).get<number>("autoExpandMaxNodes", 200);
 }

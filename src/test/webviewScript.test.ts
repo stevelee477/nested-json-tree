@@ -551,3 +551,34 @@ test("runtime Webview strings use the Host-provided translation bundle", () => {
   searchFor(harness, "value");
   assert.equal(harness.elements.get("search-count")!.textContent, "第 1 个，共 2 个");
 });
+
+test("search can ask the Host to decode embedded JSON first and then covers it", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  renderTree(harness, objectWithPayload());
+  harness.drainTimers();
+  const toggle = harness.elements.get("search-decoded")!;
+  searchFor(harness, "user");
+  assert.equal(harness.posted.some((message) => message.type === "decodeAllForSearch"), false, "off by default");
+  assert.match(harness.elements.get("search-count")!.textContent, /1/);
+
+  toggle.dispatch("click");
+  harness.drainTimers();
+  assert.equal(toggle.attributes.get("aria-pressed"), "true");
+  assert.deepEqual(harness.posted.filter((message) => message.type === "decodeAllForSearch"), [{ type: "decodeAllForSearch", renderKey: 0 }]);
+
+  harness.send({
+    type: "decodedBatch", renderKey: 0, decodedCount: 1, limited: false,
+    items: [{ nodeId: 1, decoded: { unwrapDepth: 0, root: { id: 2, type: "object", children: [
+      { key: "user", rawKey: '"user"', value: { id: 3, type: "number", raw: "7" } },
+    ] } } }],
+  });
+  harness.drainTimers();
+  // The escaped string and the decoded key both match now.
+  assert.match(harness.elements.get("search-count")!.textContent, /\/ 2$/);
+  assert.equal(harness.elements.get("tree-operation-status")!.textContent, "Decoded 1 string for search");
+  // A batch for an older render is ignored, and decoding is requested once per render.
+  harness.send({ type: "decodedBatch", renderKey: 99, decodedCount: 5, limited: true, items: [] });
+  assert.equal(harness.elements.get("tree-operation-status")!.textContent, "Decoded 1 string for search");
+  searchFor(harness, "use");
+  assert.equal(harness.posted.filter((message) => message.type === "decodeAllForSearch").length, 1);
+});
