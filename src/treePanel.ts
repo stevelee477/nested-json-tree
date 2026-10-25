@@ -280,8 +280,12 @@ export class JsonTreePanel {
 
     if (message.type === "ready") {
       readyWebviewCount += 1;
-      this.lastSyncedNodeId = undefined;
       await this.postRender();
+      // A hidden tab's Webview is rebuilt when shown again; restore the
+      // editor-cursor highlight instead of waiting for the cursor to move.
+      if (this.lastSyncedNodeId !== undefined && this.index.get(this.lastSyncedNodeId) !== undefined) {
+        await this.post({ type: "revealNode", ids: this.index.ancestry(this.lastSyncedNodeId) });
+      }
       return;
     }
 

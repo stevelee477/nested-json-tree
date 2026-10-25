@@ -582,3 +582,14 @@ test("search can ask the Host to decode embedded JSON first and then covers it",
   searchFor(harness, "use");
   assert.equal(harness.posted.filter((message) => message.type === "decodeAllForSearch").length, 1);
 });
+
+test("a reveal that arrives during expansion is applied once the tree settles", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  renderTree(harness, arrayOfSmallObjects(400), { autoExpand: true });
+  // Expansion is still running; the Host re-sends the cursor highlight after a Webview reload.
+  harness.send({ type: "revealNode", ids: [0, 799, 800] });
+  harness.drainTimers();
+  const root = harness.elements.get("tree")!.children[0];
+  const last = root.children[1].children[399];
+  assert.equal(last.children[1].children[0].children[0].classList.contains("cursor-match"), true);
+});

@@ -105,6 +105,8 @@ let focusedNode: TreeNodeElement | undefined;
 let menuOrigin: TreeNodeElement | undefined;
 let cursorRow: HTMLElement | undefined;
 let revealGeneration = 0;
+/** A reveal that arrived while a tree operation was running; applied when it ends. */
+let pendingReveal: number[] | undefined;
 /** Nodes can be revealed in the source editor (document, selection, or JSONL). */
 let sourceRevealable = false;
 /** Rendered nodes by ID, so Host replies can find their target row. */
@@ -178,6 +180,7 @@ function render(message: RenderMessage): void {
   matchRows = [];
   activeMatchIndex = -1;
   cursorRow = undefined;
+  pendingReveal = undefined;
   stickyStatus = "";
   searchCount.textContent = "";
   previousMatchButton.disabled = true;
@@ -612,7 +615,10 @@ function updateActionButtons(): void {
   expandAllButton.disabled = searchActive || treeOperationRunning || !expandAllAllowed;
   collapseAllButton.disabled = false;
   searchInput.disabled = false;
-  if (!treeOperationRunning) treeOperationStatus.textContent = stickyStatus;
+  if (!treeOperationRunning) {
+    treeOperationStatus.textContent = stickyStatus;
+    if (pendingReveal !== undefined) revealNode(pendingReveal);
+  }
 }
 
 function applyJsonlState(state: JsonlViewState): void {
@@ -1066,7 +1072,12 @@ function handleTreeKeydown(event: KeyboardEvent): void {
  * so following the editor cursor never interrupts typing.
  */
 function revealNode(ids: number[]): void {
-  if (!rootNode || ids[0] !== rootNode.nodeId || searchActive || treeOperationRunning) return;
+  if (treeOperationRunning) {
+    pendingReveal = ids;
+    return;
+  }
+  pendingReveal = undefined;
+  if (!rootNode || ids[0] !== rootNode.nodeId || searchActive) return;
   const generation = ++revealGeneration;
   const isCurrent = (): boolean => generation === revealGeneration;
   let node: TreeNodeElement = rootNode;
