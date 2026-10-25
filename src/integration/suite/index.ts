@@ -191,7 +191,7 @@ async function verifySelectionRevealAndCursorSync(api: ExtensionTestApi): Promis
       activeIsSource: active?.document === document,
       activeOffset: active ? document.offsetAt(active.selection.active) : undefined,
       panels: api.panels().map((panel) => panel.title),
-    })}`);
+    })}`, { cause: error });
   }
 }
 
