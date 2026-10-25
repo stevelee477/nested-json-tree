@@ -1,3 +1,4 @@
+/* eslint-disable no-console -- the demo runner reads readiness markers from stdout. */
 import * as path from "node:path";
 import * as vscode from "vscode";
 import type { ExtensionTestApi } from "../../extension";
