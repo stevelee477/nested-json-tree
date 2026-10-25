@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0
 
 - Added **Open Selection as Tree** (editor context menu whenever text is selected) and **Open Clipboard as Tree**.
 - Added inline decoding: strings that contain a JSON object or array expand in place, including double-encoded and repeatedly nested strings. Search covers decoded content, and jq paths cross it with `fromjson`.
@@ -11,6 +11,7 @@
 - Auto-refresh now stops at 500,000 characters by default (`nestedJsonTree.liveRefreshMaxCharacters`) and waits longer for larger text.
 - Strings that carry JSON inside other text can be decoded inline too, marked **decoded JSON (from text)**.
 - Added a search option that decodes every embedded-JSON string before searching, within fixed budgets.
+- The JSONL and source bars wrap in narrow panels, and the editor-cursor highlight survives the Tree View being hidden and shown again.
 - Added `examples/demo.log`, real-browser Webview tests in CI, a screenshot generator, and a `npm run demo` scene for VS Code screenshots.
 
 ## 0.7.0

@@ -2,7 +2,7 @@
   "name": "nested-json-tree",
   "displayName": "Nested JSON Tree",
   "description": "%extension.description%",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "publisher": "local-dev",
   "icon": "assets/icon.png",
   "author": {
