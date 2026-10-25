@@ -178,7 +178,21 @@ async function verifySelectionRevealAndCursorSync(api: ExtensionTestApi): Promis
 
   const a = childValue(panel.tree, "a");
   revealed.selection = new vscode.Selection(document.positionAt(content.indexOf('"a"') + 1), document.positionAt(content.indexOf('"a"') + 1));
-  await waitFor(() => newestPanel(api, treeTitle("Untitled", 2))?.lastSyncedNodeId === a.id || undefined, "cursor sync to the key's value");
+  try {
+    await waitFor(() => newestPanel(api, treeTitle("Untitled", 2))?.lastSyncedNodeId === a.id || undefined, "cursor sync to the key's value");
+  } catch (error) {
+    const current = newestPanel(api, treeTitle("Untitled", 2));
+    const active = vscode.window.activeTextEditor;
+    throw new Error(`${(error as Error).message} ${JSON.stringify({
+      expected: a.id,
+      lastSynced: current?.lastSyncedNodeId,
+      parsedVersion: current?.parsedVersion,
+      documentVersion: document.version,
+      activeIsSource: active?.document === document,
+      activeOffset: active ? document.offsetAt(active.selection.active) : undefined,
+      panels: api.panels().map((panel) => panel.title),
+    })}`);
+  }
 }
 
 async function verifyLiveRefreshKeepsInlineDecodedJson(api: ExtensionTestApi): Promise<void> {
