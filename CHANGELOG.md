@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.0
+
+- Extended inline decoding to support **Base64 / Base64URL Protobuf wire format** (displaying field numbers and decoded field values including varints, 32/64-bit fixed/floats, nested messages, repeated fields, UTF-8 strings, and hex bytes), **Base64 / Base64URL JSON and readable text**, **JWT** (`header`, `payload`, `signature`), and **URL query strings** (`origin`, `pathname`, `params`, `hash`).
+- Fixed dismissing a multi-candidate inline decode picker so it keeps the string expandable instead of permanently removing its expand affordance, and guarded against duplicate in-flight decode requests.
+- Improved performance and memory usage: O(1) `JsonTreeIndex.size`, zero-copy document length checks on edits, `liveRefreshMaxCharacters` protection for edited JSONL lines, faster ASCII case-folding in search, and key-based structural paths so live refresh preserves expansion and inline-decoded state when sibling keys are inserted or removed.
+- Extended timestamp value hints to recognize 16-digit microsecond, 19-digit nanosecond, and string-encoded Unix timestamps, set `<html lang>` from VS Code's display language, and added optional `--minify` support to the build script.
+
 ## 0.8.0
 
 - Added **Open Selection as Tree** (editor context menu whenever text is selected) and **Open Clipboard as Tree**.
