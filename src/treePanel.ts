@@ -3,22 +3,24 @@ import * as vscode from "vscode";
 import {
   JsonCandidate,
   JsonProcessingLimitError,
-  JsonValueNodeLimitError,
   assertInputSize,
   parseJsonCandidates,
   parseNestedJsonCandidates,
 } from "./parser";
+import { isNonJsonDecodedKind } from "./decodable";
+import { decodeInlineString } from "./inlineDecoder";
 import {
   JsonTreeDecoded,
   JsonTreeIndex,
   JsonTreeNode,
   JsonTreeNodeContext,
   JsonTreeOutputTooLargeError,
+  StructuralPathStep,
   assertTransferTextSize,
   buildJsonTreeContextIndex,
   createJsonTreeWebviewModel,
+  detectDecodableKind,
   isValidJsonTreeNodeId,
-  looksLikeEmbeddedJson,
   materializeJsonTreePath,
   stringifyJsonTreeForTransfer,
   walkJsonTree,
@@ -382,7 +384,7 @@ export class JsonTreePanel {
     });
   }
 
-  /** Decodes JSON embedded in a string node and attaches it inline. */
+  /** Decodes structured content (JSON, JWT, URL query, Base64/Protobuf) embedded in a string node. */
   private async expandDecoded(context: JsonTreeNodeContext): Promise<void> {
     const node = context.node;
     if (node.type !== "string") return;
@@ -392,11 +394,11 @@ export class JsonTreePanel {
     }
     const value = node.value as string;
     const displayPath = formatJsonPathForDisplay(materializeJsonTreePath(context));
-    const fail = async (warning?: string): Promise<void> => {
+    const fail = async (warning?: string, cancelled = false): Promise<void> => {
       if (warning !== undefined) void vscode.window.showWarningMessage(warning);
-      await this.post({ type: "decodeFailed", nodeId: node.id });
+      await this.post({ type: "decodeFailed", nodeId: node.id, ...(cancelled ? { cancelled: true } : {}) });
     };
-    if (!looksLikeEmbeddedJson(value)) {
+    if (detectDecodableKind(value) === undefined) {
       await fail(vscode.l10n.t("The string at {0} does not contain valid JSON.", displayPath));
       return;
     }
@@ -404,7 +406,7 @@ export class JsonTreePanel {
     const renderVersion = this.renderVersion;
     let decoded: JsonTreeDecoded | null | undefined;
     try {
-      decoded = await decodeEmbeddedJson(value, this.remainingNodeBudget(), (candidates) =>
+      decoded = await decodeInlineString(value, this.remainingNodeBudget(), (candidates) =>
         this.services.pickCandidate(candidates, displayPath));
     } catch (error) {
       if (error instanceof JsonProcessingLimitError) {
@@ -420,7 +422,8 @@ export class JsonTreePanel {
       return;
     }
     if (decoded === undefined) {
-      await fail();
+      // User dismissed a multi-candidate picker; keep the node expandable.
+      await fail(undefined, true);
       return;
     }
     this.index.attachDecoded(node.id, decoded);
@@ -428,16 +431,16 @@ export class JsonTreePanel {
   }
 
   /**
-   * Decodes every string that looks like embedded JSON, breadth-first so
-   * strings inside newly decoded content are included, within fixed budgets.
-   * Yields between strings so a large tree never blocks the Extension Host.
+   * Decodes every string that looks decodable (JSON, JWT, URL query, Base64/Protobuf),
+   * breadth-first so strings inside newly decoded content are included, within fixed
+   * budgets. Yields between strings so a large tree never blocks the Extension Host.
    */
   private async decodeAllForSearch(): Promise<void> {
     const renderVersion = this.renderVersion;
     const isCurrent = (): boolean => renderVersion === this.renderVersion;
     const pending: JsonTreeNode[] = [];
     const queueStrings = (root: JsonTreeNode): void => walkJsonTree(root, (node) => {
-      if (node.type === "string" && node.decoded === undefined && looksLikeEmbeddedJson(node.value as string)) {
+      if (node.type === "string" && node.decoded === undefined && detectDecodableKind(node.value as string) !== undefined) {
         pending.push(node);
       }
     });
@@ -460,7 +463,7 @@ export class JsonTreePanel {
       const budget = Math.min(this.remainingNodeBudget(), MAX_SEARCH_DECODED_NODES - addedNodes);
       let decoded: JsonTreeDecoded | null | undefined;
       try {
-        decoded = budget >= 1 ? await decodeEmbeddedJson(node.value as string, budget, async (all) => all[0]) : undefined;
+        decoded = budget >= 1 ? await decodeInlineString(node.value as string, budget, async (all) => all[0]) : undefined;
       } catch (error) {
         if (!(error instanceof JsonProcessingLimitError)) throw error;
         limited = true;
@@ -781,16 +784,20 @@ export class JsonTreePanel {
       return;
     }
 
-    this.scheduleRefresh(document.getText().length);
+    this.scheduleRefresh(documentLength(document));
   }
 
   private scheduleRefresh(characters: number): void {
     if (this.refreshTimer !== undefined) clearTimeout(this.refreshTimer);
-    if (this.source !== undefined && characters > getLiveRefreshMaxCharacters()) {
+    if (characters > getLiveRefreshMaxCharacters()) {
       this.parsedVersion = undefined;
-      this.source.status = vscode.l10n.t("The source changed.");
-      this.source.canRefresh = true;
-      void this.postSourceState();
+      if (this.source !== undefined) {
+        this.source.status = vscode.l10n.t("The source changed.");
+        this.source.canRefresh = true;
+        void this.postSourceState();
+      } else if (this.jsonlSource !== undefined) {
+        void this.postJsonlState(vscode.l10n.t("This line is too large for live refresh; press Go to re-parse."));
+      }
       return;
     }
     this.refreshTimer = setTimeout(() => {
@@ -838,7 +845,7 @@ export class JsonTreePanel {
     }
 
     const previous = this.candidate;
-    const decodedPaths: number[][] = [];
+    const decodedPaths: StructuralPathStep[][] = [];
     walkJsonTree(previous.tree, (node) => {
       if (node.decoded !== undefined) decodedPaths.push(this.index.structuralPath(node.id) ?? []);
     });
@@ -849,7 +856,7 @@ export class JsonTreePanel {
       const node = this.index.resolveStructuralPath(path);
       if (node?.type !== "string" || node.decoded !== undefined) continue;
       try {
-        const decoded = await decodeEmbeddedJson(node.value as string, this.remainingNodeBudget(), async (all) => all[0]);
+        const decoded = await decodeInlineString(node.value as string, this.remainingNodeBudget(), async (all) => all[0]);
         if (decoded) this.index.attachDecoded(node.id, decoded);
       } catch (error) {
         if (!(error instanceof JsonProcessingLimitError)) throw error;
@@ -928,52 +935,17 @@ export class JsonTreePanel {
       cspSource: webview.cspSource,
       scriptUri: webview.asWebviewUri(vscode.Uri.joinPath(root, "main.js")).toString(),
       styleUri: webview.asWebviewUri(vscode.Uri.joinPath(root, "tree.css")).toString(),
+      language: vscode.env.language,
       l10nBundle: vscode.l10n.bundle,
       t: (message) => vscode.l10n.t(message),
     });
   }
 }
 
-/**
- * Parses JSON embedded in a string for inline display. Returns undefined when
- * the user dismisses a picker and null when the value is not a container.
- */
-async function decodeEmbeddedJson(
-  value: string,
-  maxValueNodes: number,
-  pick: (candidates: JsonCandidate[]) => Promise<JsonCandidate | undefined>,
-): Promise<JsonTreeDecoded | null | undefined> {
-  if (maxValueNodes < 1) throw new JsonValueNodeLimitError(Math.max(0, maxValueNodes));
-  const candidates = parseNestedJsonCandidates(
-    value,
-    Number.isFinite(maxValueNodes) ? { maxValueNodes } : {},
-  );
-  if (candidates.length === 0) return null;
-  const selected = candidates.length === 1 ? candidates[0] : await pick(candidates);
-  if (selected === undefined) return undefined;
-  if (selected.tree.type !== "object" && selected.tree.type !== "array") return null;
-  const decoded: JsonTreeDecoded = {
-    root: selected.tree,
-    unwrapDepth: selected.unwrapDepth,
-    recovery: selected.recovery,
-  };
-  if (!isWholeDecodedValue(value, selected)) decoded.embedded = true;
-  return decoded;
-}
-
-/** True when `fromjson`, applied once per layer, yields exactly this candidate. */
-function isWholeDecodedValue(value: string, candidate: JsonCandidate): boolean {
-  let layer = value;
-  for (let depth = 0; depth < candidate.unwrapDepth; depth += 1) {
-    try {
-      const parsed: unknown = JSON.parse(layer);
-      if (typeof parsed !== "string") return false;
-      layer = parsed;
-    } catch {
-      return false;
-    }
-  }
-  return layer.trim() === candidate.raw;
+/** Document character length without materializing the full text string. */
+function documentLength(document: vscode.TextDocument): number {
+  if (document.lineCount === 0) return 0;
+  return document.offsetAt(document.lineAt(document.lineCount - 1).range.end);
 }
 
 function webviewDecoded(decoded: JsonTreeDecoded): NonNullable<RenderMessage["root"]["decoded"]> {
@@ -981,6 +953,7 @@ function webviewDecoded(decoded: JsonTreeDecoded): NonNullable<RenderMessage["ro
     root: createJsonTreeWebviewModel(decoded.root).root,
     unwrapDepth: decoded.unwrapDepth,
   };
+  if (decoded.kind !== undefined && decoded.kind !== "json") result.kind = decoded.kind;
   if (decoded.recovery !== undefined) result.recovered = true;
   if (decoded.embedded) result.embedded = true;
   return result;
@@ -1032,7 +1005,11 @@ function copyPath(action: "copyJsonPath" | "copyJqPath", context: JsonTreeNodeCo
     for (let ancestor: JsonTreeNodeContext | undefined = context; ancestor; ancestor = ancestor.parent) {
       if (ancestor.decodedFrom !== undefined) crossed.push(ancestor.decodedFrom);
     }
-    if (crossed.some((decoded) => decoded.recovery !== undefined)) {
+    if (crossed.some((decoded) => isNonJsonDecodedKind(decoded.kind))) {
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t("This path crosses a decoded non-JSON string; jq's fromjson cannot parse that format directly."),
+      );
+    } else if (crossed.some((decoded) => decoded.recovery !== undefined)) {
       void vscode.window.showWarningMessage(
         vscode.l10n.t("This path crosses a recovered partial JSON string; jq's fromjson will reject the damaged original."),
       );

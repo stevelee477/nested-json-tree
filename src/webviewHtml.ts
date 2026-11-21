@@ -5,6 +5,8 @@ export interface WebviewHtmlOptions {
   cspSource: string;
   scriptUri: string;
   styleUri: string;
+  /** BCP-47 display language for the HTML document (defaults to "en"). */
+  language?: string;
   /** Translations for strings the Webview script formats at runtime (key → text). */
   l10nBundle: Record<string, string> | undefined;
   /** Translates a static label; defaults to identity. */
@@ -13,6 +15,7 @@ export interface WebviewHtmlOptions {
 
 export function renderWebviewHtml(options: WebviewHtmlOptions): string {
   const t = (message: string): string => escapeHtml((options.t ?? ((text) => text))(message));
+  const lang = escapeHtml(options.language && options.language.trim().length > 0 ? options.language.trim() : "en");
   const csp = [
     "default-src 'none'",
     `style-src ${options.cspSource}`,
@@ -23,7 +26,7 @@ export function renderWebviewHtml(options: WebviewHtmlOptions): string {
   const bundle = JSON.stringify(options.l10nBundle ?? {}).replace(/</g, "\\u003c");
 
   return `<!doctype html>
-<html lang="en">
+<html lang="${lang}">
 <head>
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy" content="${csp}">

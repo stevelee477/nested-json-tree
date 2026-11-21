@@ -88,6 +88,8 @@ export interface DecodedMessage {
 export interface DecodeFailedMessage {
   type: "decodeFailed";
   nodeId: number;
+  /** True when the user dismissed a picker rather than the string failing to decode. */
+  cancelled?: boolean;
 }
 
 /** Strings decoded so search can cover them; owners are nodes the Webview already has. */

@@ -6,13 +6,14 @@ import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
+import { decodeInlineString } from "../inlineDecoder";
 import {
   buildJsonTreeContextIndex,
   createJsonTreeWebviewModel,
-  looksLikeEmbeddedJson,
+  detectDecodableKind,
   walkJsonTree,
 } from "../jsonTree";
-import { parseJsonCandidates, parseNestedJsonCandidates } from "../parser";
+import { parseJsonCandidates } from "../parser";
 import type { RenderMessage } from "../protocol";
 import { renderWebviewHtml } from "../webviewHtml";
 
@@ -64,22 +65,40 @@ export interface FixtureOptions {
 }
 
 /** A render message plus what the Host would answer for every decodable string. */
-export function buildFixture(sample: string, title = "JSON Tree · demo"): { render: RenderMessage; decoded: Record<number, unknown> } {
+export async function buildFixture(
+  sample: string,
+  title = "JSON Tree · demo",
+): Promise<{ render: RenderMessage; decoded: Record<number, unknown> }> {
   const [candidate] = parseJsonCandidates(sample);
   const index = buildJsonTreeContextIndex(candidate.tree);
   const decoded: Record<number, unknown> = {};
   // The model is built first so the Webview starts with decodable strings.
   const model = createJsonTreeWebviewModel(candidate.tree);
-  const decodeAll = (tree: typeof candidate.tree): void => walkJsonTree(tree, (node) => {
-    if (node.type !== "string" || node.decoded || !looksLikeEmbeddedJson(node.value as string)) return;
-    const [nested] = parseNestedJsonCandidates(node.value as string);
-    if (!nested || (nested.tree.type !== "object" && nested.tree.type !== "array")) return;
-    const attached = { root: nested.tree, unwrapDepth: nested.unwrapDepth };
-    index.attachDecoded(node.id, attached);
-    decoded[node.id] = { root: createJsonTreeWebviewModel(attached.root).root, unwrapDepth: attached.unwrapDepth };
-    decodeAll(attached.root);
-  });
-  decodeAll(candidate.tree);
+  const queue: Array<typeof candidate.tree> = [candidate.tree];
+  while (queue.length > 0) {
+    const root = queue.shift()!;
+    const candidates: Array<typeof candidate.tree> = [];
+    walkJsonTree(root, (node) => {
+      if (node.type === "string" && !node.decoded && detectDecodableKind(node.value as string) !== undefined) {
+        candidates.push(node);
+      }
+    });
+    for (const node of candidates) {
+      if (node.decoded) continue;
+      const attached = await decodeInlineString(node.value as string, 100_000, async (all) => all[0]);
+      if (!attached) continue;
+      index.attachDecoded(node.id, attached);
+      const payload: Record<string, unknown> = {
+        root: createJsonTreeWebviewModel(attached.root).root,
+        unwrapDepth: attached.unwrapDepth,
+      };
+      if (attached.kind !== undefined && attached.kind !== "json") payload.kind = attached.kind;
+      if (attached.recovery !== undefined) payload.recovered = true;
+      if (attached.embedded) payload.embedded = true;
+      decoded[node.id] = payload;
+      queue.push(attached.root);
+    }
+  }
   return {
     render: {
       type: "render", renderKey: 1, root: model.root, title, pathLabel: "$",
@@ -90,7 +109,7 @@ export function buildFixture(sample: string, title = "JSON Tree · demo"): { ren
   };
 }
 
-export function renderFixturePage(origin: string, options: FixtureOptions): string {
+export async function renderFixturePage(origin: string, options: FixtureOptions): Promise<string> {
   const bundle = options.language === "zh"
     ? JSON.parse(readFileSync(path.join(root, "l10n/bundle.l10n.zh-cn.json"), "utf8")) as Record<string, string>
     : undefined;
@@ -99,10 +118,11 @@ export function renderFixturePage(origin: string, options: FixtureOptions): stri
     cspSource: origin,
     scriptUri: `${origin}/main.js`,
     styleUri: `${origin}/tree.css`,
+    language: options.language === "zh" ? "zh-CN" : "en",
     l10nBundle: bundle,
     t: (message) => bundle?.[message] ?? message,
   });
-  const fixture = buildFixture(options.sample, options.title);
+  const fixture = await buildFixture(options.sample, options.title);
   // CSSOM writes are allowed under the CSP; a style attribute would not be.
   const mockHost = `<script nonce="${NONCE}">
     for (const [name, value] of Object.entries(${JSON.stringify(options.theme ?? {})})) {
@@ -142,7 +162,9 @@ export async function startFixtureServer(scenes: Record<string, FixtureOptions>)
     if (asset) {
       response.writeHead(200, { "content-type": asset[1] }).end(readFileSync(path.join(root, asset[0])));
     } else if (url.pathname === "/" && scene) {
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(renderFixturePage(origin, scene));
+      void renderFixturePage(origin, scene).then((html) => {
+        response.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(html);
+      });
     } else {
       response.writeHead(404).end();
     }

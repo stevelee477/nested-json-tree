@@ -232,19 +232,32 @@ test("attaches decoded JSON with fresh IDs, parent links, and decode path segmen
   assert.throws(() => index.attachDecoded(root.id, decodedFrom("[1]")), /not a string/);
 });
 
-test("structural paths survive re-parsing and cross decoded boundaries", () => {
-  const source = '{"a": 1, "payload": "[10, 20]"}';
+test("structural paths survive re-parsing, sibling key insertions, and decoded boundaries", () => {
+  const source = '{"a": 1, "payload": "[10, 20]", "dup": {"x": 1}, "dup": {"x": 2}}';
   const first = parseLosslessly(source);
   const firstIndex = buildJsonTreeContextIndex(first);
   firstIndex.attachDecoded(first.children![1].value.id, decodedFrom("[10, 20]"));
   const twenty = first.children![1].value.decoded!.root.children![1].value;
-  const path = firstIndex.structuralPath(twenty.id)!;
+  const secondDupX = first.children![3].value.children![0].value;
+  const decodedPath = firstIndex.structuralPath(twenty.id)!;
+  const dupPath = firstIndex.structuralPath(secondDupX.id)!;
 
-  const second = parseLosslessly(source);
+  // Insert a new key at the start of the object; key-based paths still resolve accurately.
+  const edited = '{"inserted": true, "a": 1, "payload": "[10, 20]", "dup": {"x": 1}, "dup": {"x": 2}}';
+  const second = parseLosslessly(edited);
   const secondIndex = buildJsonTreeContextIndex(second);
-  assert.equal(secondIndex.resolveStructuralPath(path), undefined, "not decoded yet");
-  secondIndex.attachDecoded(second.children![1].value.id, decodedFrom("[10, 20]"));
-  assert.equal(secondIndex.resolveStructuralPath(path)?.raw, "20");
+  assert.equal(secondIndex.resolveStructuralPath(decodedPath), undefined, "not decoded yet");
+  secondIndex.attachDecoded(second.children![2].value.id, decodedFrom("[10, 20]"));
+  assert.equal(secondIndex.resolveStructuralPath(decodedPath)?.raw, "20");
+  assert.equal(secondIndex.resolveStructuralPath(dupPath)?.raw, "2");
+});
+
+test("index size stays accurate in O(1) as decoded trees are attached", () => {
+  const root = parseLosslessly('{"payload": "[1, 2]"}');
+  const index = buildJsonTreeContextIndex(root);
+  assert.equal(index.size, 2);
+  index.attachDecoded(root.children![0].value.id, decodedFrom("[1, 2]"));
+  assert.equal(index.size, 5);
 });
 
 test("rebuilding an index includes previously attached decoded content", () => {

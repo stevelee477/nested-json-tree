@@ -52,11 +52,10 @@ interface TreeNodeElement extends HTMLDivElement {
   restoreSearchState(): boolean;
   openMenu(): void;
   attachDecoded(decoded: NonNullable<JsonTreeWebviewNode["decoded"]>, expand?: boolean): void;
-  markNotDecodable(): void;
+  markNotDecodable(cancelled?: boolean): void;
 }
 
-/** Child-index step for JSON decoded from a string (matches the Host index). */
-const DECODED_EDGE = -2;
+type WebviewPathStep = number | { key: string; occurrence: number } | "decoded";
 
 const strings = readL10nBundle();
 const vscode = acquireVsCodeApi();
@@ -136,7 +135,7 @@ window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) =
       renderedNodes.get(message.nodeId)?.attachDecoded(message.decoded);
       return;
     case "decodeFailed":
-      renderedNodes.get(message.nodeId)?.markNotDecodable();
+      renderedNodes.get(message.nodeId)?.markNotDecodable(message.cancelled);
       return;
     case "revealNode":
       revealNode(message.ids);
@@ -606,7 +605,7 @@ function applyDecodedBatch(message: Extract<HostToWebviewMessage, { type: "decod
 
 /** Asks the Host to parse a string's embedded JSON; the reply attaches it inline. */
 function requestDecode(node: TreeNodeElement): void {
-  if (!node.decodable) return;
+  if (!node.decodable || node.rowElement.classList.contains("decoding")) return;
   node.rowElement.classList.add("decoding");
   vscode.postMessage({ type: "expandDecoded", nodeId: node.nodeId });
 }
@@ -713,10 +712,11 @@ function createNode(
   const childNodes: TreeNodeElement[] = [];
   const childModels = (): Array<{ label: string; model: JsonTreeWebviewNode; edge: EdgeInfo }> => {
     if (model.decoded !== undefined) {
-      const label = model.decoded.recovered
-        ? t("decoded JSON (recovered)")
-        : model.decoded.embedded ? t("decoded JSON (from text)") : t("decoded JSON");
-      return [{ label, model: model.decoded.root, edge: { hasKey: false, hasRawKey: false, decoded: true } }];
+      return [{
+        label: decodedRowLabel(model.decoded),
+        model: model.decoded.root,
+        edge: { hasKey: false, hasRawKey: false, decoded: true },
+      }];
     }
     return (model.children || []).map((child) => ({
       label: String(child.key),
@@ -735,7 +735,7 @@ function createNode(
   const updateToggle = (): void => {
     toggle.className = "toggle" + (expandable ? "" : node.decodable ? " decodable" : " empty");
     toggle.textContent = expandable ? (isExpanded ? "▾" : "▸") : node.decodable ? "▸" : "";
-    toggle.title = node.decodable ? t("Show embedded JSON") : "";
+    toggle.title = node.decodable ? decodableToggleTitle(model.decodableKind) : "";
     if (expandable || node.decodable) node.setAttribute("aria-expanded", String(isExpanded));
   };
   const setExpanded = (shouldExpand: boolean): void => {
@@ -846,6 +846,7 @@ function createNode(
     // Mutating the shared model keeps search and later renders consistent.
     model.decoded = decoded;
     delete model.decodable;
+    delete model.decodableKind;
     node.decodable = false;
     expandable = true;
     modelChildren = childModels();
@@ -857,9 +858,11 @@ function createNode(
       childNodes[0]?.ensureExpanded(() => true, () => {}, true);
     }
   };
-  node.markNotDecodable = () => {
+  node.markNotDecodable = (cancelled = false) => {
     row.classList.remove("decoding");
+    if (cancelled) return;
     delete model.decodable;
+    delete model.decodableKind;
     node.decodable = false;
     node.removeAttribute?.("aria-expanded");
     updateToggle();
@@ -877,6 +880,38 @@ function createNode(
     showMenu(event.clientX, event.clientY, model, edgeInfo, node, false);
   });
   return node;
+}
+
+function decodedRowLabel(decoded: NonNullable<JsonTreeWebviewNode["decoded"]>): string {
+  switch (decoded.kind) {
+    case "jwt": return t("decoded JWT");
+    case "url": return t("decoded URL");
+    case "base64-json": return t("decoded JSON (Base64)");
+    case "base64-protobuf": return t("decoded Protobuf (Base64)");
+    case "base64-text": return t("decoded text (Base64)");
+    default:
+      return decoded.recovered
+        ? t("decoded JSON (recovered)")
+        : decoded.embedded ? t("decoded JSON (from text)") : t("decoded JSON");
+  }
+}
+
+function decodableToggleTitle(kind: JsonTreeWebviewNode["decodableKind"]): string {
+  switch (kind) {
+    case "jwt": return t("Show decoded JWT");
+    case "url": return t("Show decoded URL");
+    case "base64": return t("Show decoded Base64");
+    default: return t("Show embedded JSON");
+  }
+}
+
+function decodableMenuLabel(kind: JsonTreeWebviewNode["decodableKind"]): string {
+  switch (kind) {
+    case "jwt": return t("Show decoded JWT inline");
+    case "url": return t("Show decoded URL inline");
+    case "base64": return t("Show decoded Base64 inline");
+    default: return t("Show embedded JSON inline");
+  }
 }
 
 function typeLabel(type: JsonTreeWebviewNode["type"]): string {
@@ -923,6 +958,13 @@ function appendValue(row: HTMLElement, model: JsonTreeWebviewNode, key: string):
     const value = typeof model.value === "string" ? model.value : "";
     const length = model.valueLength ?? Array.from(value).length;
     titles.push(length === 1 ? t("1 character") : t("{0} characters", length.toLocaleString()));
+    if (!model.valueTruncated) {
+      const timestamp = describeTimestamp(value.trim(), key);
+      if (timestamp !== undefined) {
+        titles.push(timestamp.title);
+        hint = timestamp.hint;
+      }
+    }
     if (!model.valueTruncated && isColorValue(value)) {
       const swatch = document.createElement("span");
       swatch.className = "color-swatch";
@@ -939,7 +981,11 @@ function appendValue(row: HTMLElement, model: JsonTreeWebviewNode, key: string):
         vscode.postMessage({ type: "openLink", nodeId: model.id });
       });
     }
-    if (model.decodable || model.decoded) titles.push(t("Click to show the embedded JSON inline"));
+    if (model.decodable || model.decoded) {
+      const isNonJson = (model.decodableKind !== undefined && model.decodableKind !== "json") ||
+        (model.decoded?.kind !== undefined && model.decoded.kind !== "json");
+      titles.push(isNonJson ? t("Click to show the decoded value inline") : t("Click to show the embedded JSON inline"));
+    }
     titles.push(t("Right-click (or Shift+F10) to inspect or copy this string"));
   }
   span.title = titles.join("\n");
@@ -952,10 +998,14 @@ function appendValue(row: HTMLElement, model: JsonTreeWebviewNode, key: string):
   }
 }
 
-/** Plausible Unix timestamps (2000–2100) in seconds or milliseconds. */
+/** Plausible Unix timestamps (2000–2100) in seconds, milliseconds, microseconds, or nanoseconds. */
 function describeTimestamp(raw: string, key: string): { title: string; hint?: string } | undefined {
-  if (!/^\d{10}(?:\.\d+)?$/.test(raw) && !/^\d{13}$/.test(raw)) return undefined;
-  const milliseconds = raw.length === 13 ? Number(raw) : Number(raw) * 1000;
+  let milliseconds: number;
+  if (/^\d{10}(?:\.\d+)?$/.test(raw)) milliseconds = Number(raw) * 1000;
+  else if (/^\d{13}$/.test(raw)) milliseconds = Number(raw);
+  else if (/^\d{16}$/.test(raw)) milliseconds = Math.trunc(Number(raw) / 1_000);
+  else if (/^\d{19}$/.test(raw)) milliseconds = Math.trunc(Number(raw.slice(0, 13)));
+  else return undefined;
   if (milliseconds < Date.UTC(2000, 0, 1) || milliseconds >= Date.UTC(2100, 0, 1)) return undefined;
   const date = new Date(milliseconds);
   const iso = date.toISOString().replace(".000Z", "Z");
@@ -1121,7 +1171,7 @@ function showMenu(
   }
   if (model.type === "string") {
     if (origin.decodable) {
-      addMenuItem(t("Show embedded JSON inline"), () => requestDecode(origin));
+      addMenuItem(decodableMenuLabel(model.decodableKind), () => requestDecode(origin));
     }
     addMenuItem(t("Open as nested JSON tree"), () => vscode.postMessage({ type: "openNested", nodeId: model.id }));
     addMenuItem(t("Open parsed JSON in new editor"), () => vscode.postMessage({ type: "openParsedJson", nodeId: model.id }));
@@ -1200,30 +1250,83 @@ function hideMenu(restoreFocus = false): void {
   menuOrigin = undefined;
 }
 
-// Structural paths (child indexes, DECODED_EDGE for decoded strings) identify
-// nodes across a re-parse, where every ID changes.
+// Structural paths (object key + occurrence, array index, "decoded" for decoded
+// strings) identify nodes across a re-parse even when sibling keys shift.
 
-function captureViewByStructure(): { expandedPaths: number[][]; scrollTop: number } {
+function captureViewByStructure(): { expandedPaths: WebviewPathStep[][]; scrollTop: number } {
   const wanted = new Set(expandedIds);
-  const expandedPaths: number[][] = [];
+  const expandedPaths: WebviewPathStep[][] = [];
   if (currentRoot !== undefined && wanted.size > 0) {
-    const pending: Array<{ model: JsonTreeWebviewNode; path: number[] }> = [{ model: currentRoot, path: [] }];
-    while (pending.length > 0) {
-      const { model, path } = pending.pop() as { model: JsonTreeWebviewNode; path: number[] };
-      if (wanted.has(model.id)) expandedPaths.push(path);
-      if (model.decoded) pending.push({ model: model.decoded.root, path: [...path, DECODED_EDGE] });
-      (model.children || []).forEach((child, index) => pending.push({ model: child.value, path: [...path, index] }));
+    type Frame =
+      | { kind: "enter"; model: JsonTreeWebviewNode; step?: WebviewPathStep }
+      | { kind: "exit" };
+    const path: WebviewPathStep[] = [];
+    const stack: Frame[] = [{ kind: "enter", model: currentRoot }];
+    while (stack.length > 0) {
+      const frame = stack.pop() as Frame;
+      if (frame.kind === "exit") {
+        path.pop();
+        continue;
+      }
+      if (frame.step !== undefined) {
+        path.push(frame.step);
+        stack.push({ kind: "exit" });
+      }
+      const model = frame.model;
+      if (wanted.has(model.id)) expandedPaths.push(path.slice());
+      if (model.decoded) {
+        stack.push({ kind: "enter", model: model.decoded.root, step: "decoded" });
+      }
+      const children = model.children;
+      if (children !== undefined && children.length > 0) {
+        if (model.type === "object") {
+          const counts = new Map<string, number>();
+          const steps: WebviewPathStep[] = new Array(children.length);
+          for (let index = 0; index < children.length; index += 1) {
+            const key = String(children[index].key);
+            const occurrence = counts.get(key) ?? 0;
+            counts.set(key, occurrence + 1);
+            steps[index] = { key, occurrence };
+          }
+          for (let index = children.length - 1; index >= 0; index -= 1) {
+            stack.push({ kind: "enter", model: children[index].value, step: steps[index] });
+          }
+        } else {
+          for (let index = children.length - 1; index >= 0; index -= 1) {
+            stack.push({ kind: "enter", model: children[index].value, step: index });
+          }
+        }
+      }
     }
   }
   return { expandedPaths, scrollTop: tree.scrollTop };
 }
 
-function resolveStructuralPaths(paths: number[][]): number[] {
+function resolveStructuralPaths(paths: WebviewPathStep[][]): number[] {
   const ids: number[] = [];
   for (const path of paths) {
     let model: JsonTreeWebviewNode | undefined = currentRoot;
     for (const step of path) {
-      model = step === DECODED_EDGE ? model?.decoded?.root : model?.children?.[step]?.value;
+      if (step === "decoded") {
+        model = model?.decoded?.root;
+      } else if (typeof step === "number") {
+        model = model?.children?.[step]?.value;
+      } else if (model?.type === "object" && model.children !== undefined) {
+        let seen = 0;
+        let found: JsonTreeWebviewNode | undefined;
+        for (const child of model.children) {
+          if (String(child.key) === step.key) {
+            if (seen === step.occurrence) {
+              found = child.value;
+              break;
+            }
+            seen += 1;
+          }
+        }
+        model = found;
+      } else {
+        model = undefined;
+      }
       if (model === undefined) break;
     }
     if (model !== undefined) ids.push(model.id);

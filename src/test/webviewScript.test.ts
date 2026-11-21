@@ -444,16 +444,118 @@ test("decodable strings request inline decoding and render the decoded JSON as a
   assert.match(harness.elements.get("search-count")!.textContent, /1/);
 });
 
-test("a string that fails to decode loses its expand affordance", () => {
+test("a string that fails to decode loses its expand affordance, while cancellation preserves it", () => {
   const harness = createWebviewHarness(embeddedWebviewScript());
   renderTree(harness, objectWithPayload());
   harness.drainTimers();
   const payload = harness.elements.get("tree")!.children[0].children[1].children[0];
+
+  // Clicking while a decode request is already in flight does not send a duplicate message.
+  rowParts(payload).row.dispatch("click");
+  rowParts(payload).row.dispatch("click");
+  assert.equal(harness.posted.filter((message) => message.type === "expandDecoded").length, 1);
+
+  // Dismissing a candidate picker clears loading state without stripping the affordance.
+  harness.send({ type: "decodeFailed", nodeId: 1, cancelled: true });
+  assert.equal(rowParts(payload).row.classList.contains("decoding"), false);
+  assert.equal(rowParts(payload).toggle.className, "toggle decodable");
+  rowParts(payload).row.dispatch("click");
+  assert.equal(harness.posted.filter((message) => message.type === "expandDecoded").length, 2);
+
+  // Permanent failure removes the expand affordance.
   harness.send({ type: "decodeFailed", nodeId: 1 });
   assert.equal(rowParts(payload).toggle.className, "toggle empty");
   assert.equal(payload.attributes.has("aria-expanded"), false);
   rowParts(payload).row.dispatch("click");
-  assert.equal(harness.posted.filter((message) => message.type === "expandDecoded").length, 0);
+  assert.equal(harness.posted.filter((message) => message.type === "expandDecoded").length, 2);
+});
+
+test("non-JSON inline decoded kinds render format-specific labels and tooltips", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  renderTree(harness, {
+    id: 0,
+    type: "object",
+    children: [
+      { key: "pb", rawKey: '"pb"', value: { id: 1, type: "string", raw: '"CJYB"', value: "CJYB", decodable: true, decodableKind: "base64" } },
+      { key: "token", rawKey: '"token"', value: { id: 2, type: "string", raw: '"eyJ.eyJ.sig"', value: "eyJ.eyJ.sig", decodable: true, decodableKind: "jwt" } },
+    ],
+  });
+  harness.drainTimers();
+  const [pb, token] = harness.elements.get("tree")!.children[0].children[1].children;
+  assert.equal(rowParts(pb).toggle.title, "Show decoded Base64");
+  assert.equal(rowParts(token).toggle.title, "Show decoded JWT");
+
+  harness.send({
+    type: "decoded",
+    nodeId: 1,
+    decoded: {
+      unwrapDepth: 0,
+      kind: "base64-protobuf",
+      root: { id: 10, type: "object", children: [{ key: "1", rawKey: '"1"', value: { id: 11, type: "number", raw: "150" } }] },
+    },
+  });
+  harness.drainTimers();
+  assert.equal(rowParts(pb.children[1].children[0]).key.textContent, "decoded Protobuf (Base64)");
+});
+
+test("microsecond, nanosecond, and string-encoded timestamps render hints", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  renderTree(harness, {
+    id: 0,
+    type: "object",
+    children: [
+      { key: "createdAt", rawKey: '"createdAt"', value: { id: 1, type: "number", raw: "1767225600000000" } },
+      { key: "updatedAt", rawKey: '"updatedAt"', value: { id: 2, type: "number", raw: "1767225600000000000" } },
+      { key: "ts", rawKey: '"ts"', value: { id: 3, type: "string", raw: '"1767225600000"', value: "1767225600000" } },
+    ],
+  });
+  harness.drainTimers();
+  const [createdAt, updatedAt, ts] = harness.elements.get("tree")!.children[0].children[1].children;
+  assert.equal(rowParts(createdAt).rest[0].textContent, "2026-01-01T00:00:00Z");
+  assert.equal(rowParts(updatedAt).rest[0].textContent, "2026-01-01T00:00:00Z");
+  assert.equal(rowParts(ts).rest[0].textContent, "2026-01-01T00:00:00Z");
+});
+
+test("preserveView keeps object expansion by key when new keys are inserted above", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  renderTree(harness, {
+    id: 0,
+    type: "object",
+    children: [
+      { key: "first", rawKey: '"first"', value: { id: 1, type: "object", children: [{ key: "a", rawKey: '"a"', value: { id: 2, type: "number", raw: "1" } }] } },
+      { key: "target", rawKey: '"target"', value: { id: 3, type: "object", children: [{ key: "b", rawKey: '"b"', value: { id: 4, type: "number", raw: "2" } }] } },
+    ],
+  }, { renderKey: 1 });
+  harness.drainTimers();
+  harness.elements.get("tree")!.children[0].children[1].children[1].children[0].dispatch("click");
+  harness.drainTimers();
+
+  renderTree(harness, {
+    id: 10,
+    type: "object",
+    children: [
+      { key: "inserted", rawKey: '"inserted"', value: { id: 11, type: "object", children: [{ key: "z", rawKey: '"z"', value: { id: 12, type: "number", raw: "0" } }] } },
+      { key: "first", rawKey: '"first"', value: { id: 13, type: "object", children: [{ key: "a", rawKey: '"a"', value: { id: 14, type: "number", raw: "1" } }] } },
+      { key: "target", rawKey: '"target"', value: { id: 15, type: "object", children: [{ key: "b", rawKey: '"b"', value: { id: 16, type: "number", raw: "2" } }] } },
+    ],
+  }, { renderKey: 2, preserveView: true });
+  harness.drainTimers();
+  const children = harness.elements.get("tree")!.children[0].children[1].children;
+  assert.equal(children[0].attributes.get("aria-expanded"), "false");
+  assert.equal(children[1].attributes.get("aria-expanded"), "false");
+  assert.equal(children[2].attributes.get("aria-expanded"), "true");
+});
+
+test("renderWebviewHtml applies the provided display language", () => {
+  const zhHtml = renderWebviewHtml({
+    nonce: "NONCE",
+    cspSource: "vscode-resource:",
+    scriptUri: "vscode-resource:/main.js",
+    styleUri: "vscode-resource:/tree.css",
+    language: "zh-CN",
+    l10nBundle: {},
+  });
+  assert.match(zhHtml, /<html lang="zh-CN">/);
 });
 
 test("values show timestamp, color, length, and link hints", () => {

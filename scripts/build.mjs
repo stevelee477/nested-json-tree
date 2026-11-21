@@ -2,6 +2,7 @@
 import * as esbuild from "esbuild";
 
 const watch = process.argv.includes("--watch");
+const minify = process.argv.includes("--minify");
 
 const builds = [
   {
@@ -13,6 +14,8 @@ const builds = [
     mainFields: ["module", "main"],
     external: ["vscode"],
     sourcemap: true,
+    minify,
+    keepNames: minify,
     outfile: "out/extension.js",
   },
   {
@@ -22,6 +25,7 @@ const builds = [
     format: "iife",
     target: "es2020",
     sourcemap: true,
+    minify,
     outdir: "out/webview",
   },
 ];

@@ -19,13 +19,21 @@ export interface JsonTreeSearchState {
   stack: JsonTreeSearchFrame[];
 }
 
+/** Uses fast ASCII lowercasing when possible and preserves locale folding for Unicode. */
+function foldCase(text: string): string {
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charCodeAt(index) > 0x7f) return text.toLocaleLowerCase();
+  }
+  return text.toLowerCase();
+}
+
 /** Creates an incremental, lossless-tree search suitable for the Webview event loop. */
 export function createJsonTreeSearchState(
   root: JsonTreeNode,
   query: string,
   maxMatches = 5_000,
 ): JsonTreeSearchState {
-  const needle = query.trim().toLocaleLowerCase();
+  const needle = foldCase(query.trim());
   const done = needle.length === 0 || maxMatches <= 0;
   return {
     matches: [],
@@ -62,12 +70,20 @@ export function advanceJsonTreeSearch(
     if (!frame.entered) {
       frame.entered = true;
       visitedNodes += 1;
-      const keyText = frame.key === undefined ? "" : `${String(frame.key)}\n${frame.rawKey ?? ""}`;
-      const primitiveText = jsonTreePrimitiveSearchText(frame.node);
-      if (
-        keyText.toLocaleLowerCase().includes(state.needle) ||
-        primitiveText.toLocaleLowerCase().includes(state.needle)
-      ) {
+      let matched = false;
+      if (frame.key !== undefined) {
+        const keyString = String(frame.key);
+        matched =
+          foldCase(keyString).includes(state.needle) ||
+          (frame.rawKey !== undefined && foldCase(frame.rawKey).includes(state.needle));
+      }
+      if (!matched) {
+        const primitiveText = jsonTreePrimitiveSearchText(frame.node);
+        if (primitiveText.length > 0) {
+          matched = foldCase(primitiveText).includes(state.needle);
+        }
+      }
+      if (matched) {
         if (state.matches.length >= state.maxMatches) {
           state.truncated = true;
           state.done = true;

@@ -1,7 +1,21 @@
 import type { Node as JsoncNode } from "jsonc-parser";
+import { detectDecodableKind, looksLikeEmbeddedJson } from "./decodable";
 import type { JsonRecovery, JsonValue } from "./parser";
 
+export { detectDecodableKind, looksLikeEmbeddedJson };
+
 export type JsonTreeNodeType = "object" | "array" | "string" | "number" | "boolean" | "null";
+export type JsonTreeDecodableKind = "json" | "jwt" | "url" | "base64";
+export type JsonTreeDecodedKind =
+  | "json"
+  | "jwt"
+  | "url"
+  | "base64-json"
+  | "base64-protobuf"
+  | "base64-text";
+
+/** Identifies one step along a tree path across re-parses (object keys survive insertions). */
+export type StructuralPathStep = number | { key: string; occurrence: number } | "decoded";
 
 export const MAX_PRETTY_OUTPUT_CHARACTERS = 16 * 1024 * 1024;
 export const MAX_TRANSFER_OUTPUT_CHARACTERS = 50 * 1024 * 1024;
@@ -54,11 +68,13 @@ export interface JsonTreeNode {
   decoded?: JsonTreeDecoded;
 }
 
-/** JSON embedded in a string value. Never part of copy/serialize output. */
+/** Structured value decoded from a string value. Never part of copy/serialize output. */
 export interface JsonTreeDecoded {
   root: JsonTreeNode;
   /** Extra string-decoding passes beyond the first (double-encoded JSON). */
   unwrapDepth: number;
+  /** Encoding format that produced this inline view. Defaults to "json". */
+  kind?: JsonTreeDecodedKind;
   recovery?: JsonRecovery;
   /** The JSON was extracted from surrounding text, so `fromjson` cannot reproduce it. */
   embedded?: true;
@@ -105,9 +121,17 @@ export interface JsonTreeWebviewNode {
   valueTruncated?: true;
   valueLength?: number;
   children?: JsonTreeWebviewChild[];
-  /** The string value looks like embedded JSON and can be decoded inline. */
+  /** The string value looks like decodable content (JSON, JWT, URL query, Base64/Protobuf). */
   decodable?: true;
-  decoded?: { root: JsonTreeWebviewNode; unwrapDepth: number; recovered?: true; embedded?: true };
+  /** Hint for what kind of encoded payload this string looks like. */
+  decodableKind?: JsonTreeDecodableKind;
+  decoded?: {
+    root: JsonTreeWebviewNode;
+    unwrapDepth: number;
+    kind?: JsonTreeDecodedKind;
+    recovered?: true;
+    embedded?: true;
+  };
 }
 
 export interface JsonTreeWebviewModel {
@@ -213,6 +237,7 @@ export class JsonTreeIndex {
   private parents = new Int32Array(0);
   private childIndexes = new Int32Array(0);
   private duplicateKeyInPath = new Uint8Array(0);
+  private nodeCount = 0;
 
   constructor(private readonly root: JsonTreeNode) {
     let maxId = root.id;
@@ -229,11 +254,9 @@ export class JsonTreeIndex {
     return this.nodes.length;
   }
 
-  /** Total nodes, including attached decoded content. */
+  /** Total nodes, including attached decoded content, in O(1). */
   get size(): number {
-    let count = 0;
-    for (const node of this.nodes) if (node !== undefined) count += 1;
-    return count;
+    return this.nodeCount;
   }
 
   get(id: number): JsonTreeNodeContext | undefined {
@@ -284,21 +307,58 @@ export class JsonTreeIndex {
     this.register(decoded.root, stringNodeId, DECODED_EDGE, this.duplicateKeyInPath[stringNodeId] === 1);
   }
 
-  /** Child-index path from the root (DECODED_EDGE marks a decoded boundary); survives re-parsing. */
-  structuralPath(id: number): number[] | undefined {
+  /**
+   * Key-aware structural path from the root that survives re-parsing even when
+   * sibling keys are inserted or removed above a property.
+   */
+  structuralPath(id: number): StructuralPathStep[] | undefined {
     if (this.nodes[id] === undefined) return undefined;
-    const path: number[] = [];
+    const path: StructuralPathStep[] = [];
     for (let current = id; this.parents[current] >= 0; current = this.parents[current]) {
-      path.push(this.childIndexes[current]);
+      const edge = this.childIndexes[current];
+      if (edge === DECODED_EDGE) {
+        path.push("decoded");
+        continue;
+      }
+      const parent = this.nodes[this.parents[current]] as JsonTreeNode;
+      if (parent.type === "object" && parent.children !== undefined) {
+        const key = String(parent.children[edge].key);
+        let occurrence = 0;
+        for (let index = 0; index < edge; index += 1) {
+          if (parent.children[index].key === key) occurrence += 1;
+        }
+        path.push({ key, occurrence });
+      } else {
+        path.push(edge);
+      }
     }
     return path.reverse();
   }
 
   /** Resolves a structural path produced by another index for the same source. */
-  resolveStructuralPath(path: number[]): JsonTreeNode | undefined {
+  resolveStructuralPath(path: readonly StructuralPathStep[]): JsonTreeNode | undefined {
     let node: JsonTreeNode | undefined = this.root;
     for (const step of path) {
-      node = step === DECODED_EDGE ? node?.decoded?.root : node?.children?.[step]?.value;
+      if (step === "decoded") {
+        node = node?.decoded?.root;
+      } else if (typeof step === "number") {
+        node = node?.children?.[step]?.value;
+      } else if (node?.type === "object" && node.children !== undefined) {
+        let seen = 0;
+        let found: JsonTreeNode | undefined;
+        for (const child of node.children) {
+          if (child.key === step.key) {
+            if (seen === step.occurrence) {
+              found = child.value;
+              break;
+            }
+            seen += 1;
+          }
+        }
+        node = found;
+      } else {
+        return undefined;
+      }
       if (node === undefined) return undefined;
     }
     return node;
@@ -357,6 +417,7 @@ export class JsonTreeIndex {
   private register(root: JsonTreeNode, parentId: number, edge: number, inheritedDuplicate: boolean): void {
     if (this.nodes[root.id] !== undefined) throw new Error(`Duplicate JSON tree node ID ${root.id}.`);
     this.nodes[root.id] = root;
+    this.nodeCount += 1;
     this.parents[root.id] = parentId;
     this.childIndexes[root.id] = edge;
     this.duplicateKeyInPath[root.id] = inheritedDuplicate ? 1 : 0;
@@ -381,6 +442,7 @@ export class JsonTreeIndex {
         const id = child.value.id;
         if (this.nodes[id] !== undefined) throw new Error(`Duplicate JSON tree node ID ${id}.`);
         this.nodes[id] = child.value;
+        this.nodeCount += 1;
         this.parents[id] = parent.id;
         this.childIndexes[id] = index;
         this.duplicateKeyInPath[id] =
@@ -391,6 +453,7 @@ export class JsonTreeIndex {
       if (decodedRoot !== undefined) {
         if (this.nodes[decodedRoot.id] !== undefined) throw new Error(`Duplicate JSON tree node ID ${decodedRoot.id}.`);
         this.nodes[decodedRoot.id] = decodedRoot;
+        this.nodeCount += 1;
         this.parents[decodedRoot.id] = parent.id;
         this.childIndexes[decodedRoot.id] = DECODED_EDGE;
         this.duplicateKeyInPath[decodedRoot.id] = parentDuplicate ? 1 : 0;
@@ -433,34 +496,6 @@ export function materializeJsonTreePath(
   }
   path.reverse();
   return path;
-}
-
-/**
- * Cheap pre-check: does a decoded string value hold a JSON container, either
- * as the whole value or inside surrounding text such as `data: {"id": 1}`? The
- * surrounding-text form needs a strong signal (an object key or an array of
- * objects/strings) so ordinary prose with brackets is not offered.
- */
-export function looksLikeEmbeddedJson(value: string): boolean {
-  return looksLikeWholeJson(value) || /\{\s*"[^"\n]{0,200}"\s*:|\[\s*[{"]/.test(value);
-}
-
-function looksLikeWholeJson(value: string): boolean {
-  let start = 0;
-  let end = value.length - 1;
-  while (start <= end && isJsonWhitespace(value.charCodeAt(start))) start += 1;
-  while (end >= start && isJsonWhitespace(value.charCodeAt(end))) end -= 1;
-  if (end - start < 1) return false;
-  const first = value[start];
-  const last = value[end];
-  if ((first === "{" && last === "}") || (first === "[" && last === "]")) return true;
-  // Double-encoded JSON: a JSON string literal whose content is a container.
-  return first === '"' && last === '"' && end - start >= 3 &&
-    (value.startsWith("{", start + 1) || value.startsWith("[", start + 1));
-}
-
-function isJsonWhitespace(code: number): boolean {
-  return code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d;
 }
 
 /**
@@ -510,11 +545,18 @@ export function createJsonTreeWebviewModel(
       if (node.decoded !== undefined) {
         const decodedRoot = copyNode(node.decoded.root);
         target.decoded = { root: decodedRoot, unwrapDepth: node.decoded.unwrapDepth };
+        if (node.decoded.kind !== undefined && node.decoded.kind !== "json") {
+          target.decoded.kind = node.decoded.kind;
+        }
         if (node.decoded.recovery !== undefined) target.decoded.recovered = true;
         if (node.decoded.embedded) target.decoded.embedded = true;
         pending.push({ source: node.decoded.root, target: decodedRoot });
-      } else if (looksLikeEmbeddedJson(node.value)) {
-        target.decodable = true;
+      } else {
+        const decodableKind = detectDecodableKind(node.value);
+        if (decodableKind !== undefined) {
+          target.decodable = true;
+          if (decodableKind !== "json") target.decodableKind = decodableKind;
+        }
       }
     } else if (node.value !== undefined) {
       target.value = node.value;
