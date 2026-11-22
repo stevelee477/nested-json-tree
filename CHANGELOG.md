@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.0
+
+- Improved large-document performance and responsiveness: added a single-pass iterative JSONC parser, reusable `worker_threads` parsing for documents at or above 250,000 characters (`out/parseWorker.js`), Webview virtual scrolling with single-container event delegation (raising the **Expand all** limit to 100,000 nodes), zero-AST Protobuf wire prechecks with packed repeated varint decoding, `O(n)` Base64 syntax/trailing-bit validation with slug filtering, `WeakMap` decodable detection caching, iterative subtree cloning, and minified production builds (`compile:prod` / `vscode:prepublish`).
+- Enhanced interactive tree browsing: added a focused-node breadcrumb bar with click navigation and JSONPath / `jq` quick copy, a depth expansion selector, alphabetical object-key sorting (`A→Z`), collapsed container inline previews, row quick-action buttons, `Cmd`/`Ctrl`+`C` and `Shift`+`Cmd`/`Ctrl`+`C` copy shortcuts, **Open subtree in new Tree View**, **Open formatted JSON in new editor**, and unified nested decoding for **Open in new Tree View**.
+- Expanded timestamp conversion to format both Unix timestamps (seconds, milliseconds, microseconds, nanoseconds; numeric or string) and strict ISO-8601 strings as local and relative time, with expired warnings on past `exp` / `expiresAt` fields.
+- Added JSONL record filtering (free text, quoted phrases, `key=value`, `a.b=value`), matching-record listing, **Keep view** to preserve inline-decoded paths across records, and an interactive table view with filtering, sorting, row jump, and RFC 4180 CSV copy/export for both object-array nodes and JSONL records.
+
 ## 0.9.0
 
 - Extended inline decoding to support **Base64 / Base64URL Protobuf wire format** (displaying field numbers and decoded field values including varints, 32/64-bit fixed/floats, nested messages, repeated fields, UTF-8 strings, and hex bytes), **Base64 / Base64URL JSON and readable text**, **JWT** (`header`, `payload`, `signature`), and **URL query strings** (`origin`, `pathname`, `params`, `hash`).
