@@ -15,6 +15,7 @@ import {
 } from "../jsonTree";
 import { parseJsonCandidates } from "../parser";
 import type { RenderMessage } from "../protocol";
+import { buildTableFromArrayNode, isTabularArrayNode, type TableModel } from "../tableData";
 import { renderWebviewHtml } from "../webviewHtml";
 
 const root = path.resolve(__dirname, "../..");
@@ -68,10 +69,17 @@ export interface FixtureOptions {
 export async function buildFixture(
   sample: string,
   title = "JSON Tree · demo",
-): Promise<{ render: RenderMessage; decoded: Record<number, unknown> }> {
+): Promise<{ render: RenderMessage; decoded: Record<number, unknown>; tables: Record<number, TableModel> }> {
   const [candidate] = parseJsonCandidates(sample);
   const index = buildJsonTreeContextIndex(candidate.tree);
   const decoded: Record<number, unknown> = {};
+  const tables: Record<number, TableModel> = {};
+  walkJsonTree(candidate.tree, (node) => {
+    if (isTabularArrayNode(node)) {
+      const table = buildTableFromArrayNode(node, title);
+      if (table !== undefined) tables[node.id] = table;
+    }
+  });
   // The model is built first so the Webview starts with decodable strings.
   const model = createJsonTreeWebviewModel(candidate.tree);
   const queue: Array<typeof candidate.tree> = [candidate.tree];
@@ -102,10 +110,11 @@ export async function buildFixture(
   return {
     render: {
       type: "render", renderKey: 1, root: model.root, title, pathLabel: "$",
-      truncatedFieldCount: 0, autoExpand: true, canExpandAll: true, expandAllLimit: 10_000,
+      truncatedFieldCount: 0, autoExpand: true, canExpandAll: true, expandAllLimit: 100_000,
       source: { linked: true, syncCursor: true, status: "", canRefresh: false },
     },
     decoded,
+    tables,
   };
 }
 
@@ -137,6 +146,10 @@ export async function renderFixturePage(origin: string, options: FixtureOptions)
         if (message.type === "expandDecoded") {
           const decoded = ${JSON.stringify(fixture.decoded)}[message.nodeId];
           reply(decoded ? { type: "decoded", nodeId: message.nodeId, decoded } : { type: "decodeFailed", nodeId: message.nodeId });
+        }
+        if (message.type === "openArrayTable") {
+          const table = ${JSON.stringify(fixture.tables)}[message.nodeId];
+          if (table) reply({ type: "tableData", table });
         }
       },
       getState() {},

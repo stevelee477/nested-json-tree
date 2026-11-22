@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { jsonTreeToValue } from "../jsonTree";
-import { decodeProtobufMessage } from "../protobuf";
+import { decodeProtobufMessage, inspectProtobufWire } from "../protobuf";
 
 /** Helper to encode a varint into bytes. */
 function encodeVarint(value: bigint): number[] {
@@ -189,4 +189,50 @@ test("enforces maxValueNodes and maxDepth budgets safely without recursion overf
   // When depth exceeds maxDepth, inner bytes are kept as hex rather than crashing.
   const shallow = decodeProtobufMessage(nested, { maxDepth: 2 });
   assert.ok(shallow);
+});
+
+test("inspectProtobufWire matches decodeProtobufMessage summary without allocating nodes", () => {
+  const nested = [
+    ...encodeVarintField(1, 7),
+    ...encodeLenField(2, "metadata"),
+  ];
+  const message = Uint8Array.from([
+    ...encodeLenField(1, "alice"),
+    ...encodeVarintField(2, 30),
+    ...encodeLenField(3, nested),
+  ]);
+  const decoded = decodeProtobufMessage(message)!;
+  const inspected = inspectProtobufWire(message)!;
+  assert.deepEqual(inspected, {
+    fieldCount: decoded.fieldCount,
+    minTopLevelFieldNumber: decoded.minTopLevelFieldNumber,
+    maxTopLevelFieldNumber: decoded.maxTopLevelFieldNumber,
+    hasStructuredContent: decoded.hasStructuredContent,
+  });
+  assert.equal(inspectProtobufWire(Uint8Array.from([0x0e, 0x01])), undefined);
+  assert.equal(inspectProtobufWire(message, { maxValueNodes: 2 }), undefined);
+});
+
+test("decodes packed repeated varints conservatively without breaking binary hashes", () => {
+  const packedPayload = [...encodeVarint(150n), ...encodeVarint(200n), ...encodeVarint(300n)];
+  const message = Uint8Array.from([
+    ...encodeLenField(1, packedPayload),
+    // 16-byte binary hash/UUID stays hex even if bytes happen to be small varints.
+    ...encodeLenField(2, new Array(16).fill(1)),
+  ]);
+  const decoded = decodeProtobufMessage(message);
+  assert.ok(decoded);
+  assert.deepEqual(jsonTreeToValue(decoded.root), {
+    "1": [150, 200, 300],
+    "2": "0x01010101010101010101010101010101",
+  });
+});
+
+test("rejects bogus nested wire candidates whose minimum field number exceeds 1024", () => {
+  const highFieldInner = encodeVarintField(2048, 1);
+  const outer = Uint8Array.from(encodeLenField(1, highFieldInner));
+  const decoded = decodeProtobufMessage(outer);
+  assert.ok(decoded);
+  // Not split into a nested message because min field number > 1024.
+  assert.equal(typeof (jsonTreeToValue(decoded.root) as Record<string, unknown>)["1"], "string");
 });

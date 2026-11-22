@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { jsonTreeToValue } from "../jsonTree";
-import { findJsonlRecord } from "../jsonlNavigator";
+import {
+  candidateMatchesFilter,
+  findJsonlRecord,
+  lineMightMatchFilter,
+  parseJsonlFilter,
+  searchJsonlLines,
+} from "../jsonlNavigator";
 import { JsonProcessingLimitError, parseJsonCandidates } from "../parser";
 
 function lines(...values: string[]) {
@@ -99,4 +105,30 @@ test("JSONL navigation includes recoverable lines and multiple values on a line"
   assert.deepEqual(result.record.candidates.map((candidate) => jsonTreeToValue(candidate.tree)), [{ id: 1 }, { next: 2 }]);
   assert.ok(result.record.candidates[0].recovery);
   assert.equal(result.record.candidates[1].recovery, undefined);
+});
+
+test("parseJsonlFilter, lineMightMatchFilter, and filtered navigation support text and key=value terms", async () => {
+  const filter = parseJsonlFilter('level=ERROR user.id=42 msg="order failed"');
+  assert.ok(filter);
+  assert.equal(filter.terms.length, 3);
+
+  const source = lines(
+    '{"level":"INFO","user":{"id":42},"msg":"order failed"}',
+    '{"level":"ERROR","user":{"id":420},"msg":"order failed"}',
+    '{"level":"ERROR","user":{"id":42},"msg":"order \\u0066ailed for item"}',
+  );
+  assert.equal(lineMightMatchFilter(source.lineAt(0), filter), false);
+  // Escaped line bypasses pre-check so decoded string matches still work.
+  assert.equal(lineMightMatchFilter(source.lineAt(2), filter), true);
+  assert.equal(candidateMatchesFilter(parseJsonCandidates(source.lineAt(1))[0], filter), false);
+
+  const found = await findJsonlRecord(source, 0, 1, { filter });
+  assert.equal(found.status, "found");
+  if (found.status !== "found") return;
+  assert.equal(found.record.lineNumber, 2);
+  assert.equal(found.record.skippedLines, 2);
+
+  const listed = await searchJsonlLines(source, { filter });
+  assert.equal(listed.status, "done");
+  assert.deepEqual(listed.matches.map((m) => m.lineNumber), [2]);
 });

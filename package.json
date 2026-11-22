@@ -144,8 +144,9 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run compile:prod",
     "compile": "tsc -p ./ && node scripts/build.mjs",
+    "compile:prod": "tsc -p ./ && node scripts/build.mjs --minify",
     "watch": "node scripts/build.mjs --watch",
     "typecheck": "tsc -p ./ --noEmit",
     "lint": "eslint .",

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { detectDecodableKind } from "../decodable";
+import { decodeBase64Bytes, detectDecodableKind, isLikelyPlainWordOrHash } from "../decodable";
 import { decodeInlineString } from "../inlineDecoder";
 import { jsonTreeToValue } from "../jsonTree";
 
@@ -151,6 +151,12 @@ test("avoids false positives on ordinary words, identifiers, acronyms, and hex h
     "UserInfo",
     "OrderLog",
     "JsonTree",
+    "CamelCase",
+    "UserName",
+    "PassWord",
+    "MetaData",
+    "my-service-name",
+    "order-v2-prod",
     "12345678",
     "1767225600000",
     "550e8400e29b41d4a716446655440000",
@@ -162,4 +168,19 @@ test("avoids false positives on ordinary words, identifiers, acronyms, and hex h
   for (const sample of ordinaryStrings) {
     assert.equal(detectDecodableKind(sample), undefined, `unexpectedly flagged as decodable: ${sample}`);
   }
+});
+
+test("decodeBase64Bytes validates trailing bits, padding, and alphabet strictly", () => {
+  assert.equal(Buffer.from(decodeBase64Bytes("SGVsbG8=") ?? []).toString("utf8"), "Hello");
+  assert.equal(Buffer.from(decodeBase64Bytes("SGVsbG8") ?? []).toString("utf8"), "Hello");
+  assert.equal(Buffer.from(decodeBase64Bytes("e30") ?? []).toString("utf8"), "{}");
+  assert.equal(Buffer.from(decodeBase64Bytes("QQ==") ?? []).toString("utf8"), "A");
+  // Non-canonical trailing unused bits
+  assert.equal(decodeBase64Bytes("QR=="), undefined);
+  assert.equal(decodeBase64Bytes("SGVsbG9"), undefined);
+  // Mixed standard/URL alphabets, internal '=', or invalid characters
+  assert.equal(decodeBase64Bytes("ab+d-f=="), undefined);
+  assert.equal(decodeBase64Bytes("AA=A"), undefined);
+  assert.equal(decodeBase64Bytes("A==="), undefined);
+  assert.equal(isLikelyPlainWordOrHash("my-service-name"), true);
 });

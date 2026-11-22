@@ -2,6 +2,7 @@ import {
   Node as JsoncNode,
   ParseError,
   ParseErrorCode,
+  ScanError,
   SyntaxKind,
   createScanner,
   parseTree,
@@ -813,25 +814,250 @@ function tryParse(
   raw: string,
   maxValueNodes: number,
 ): { ok: true; tree: JsonTreeNode; nodeCount: number } | { ok: false } {
-  const errors: ParseError[] = [];
-  try {
-    const nodeCount = assertJsonComplexityWithinLimits(raw, maxValueNodes);
-    if (nodeCount === undefined) return { ok: false };
-    const root = parseTree(raw, errors, {
-      allowTrailingComma: true,
-      disallowComments: false,
-    });
-    if (root === undefined || errors.length > 0) return { ok: false };
-    const tree = buildJsonTree(root, raw);
-    return { ok: true, tree, nodeCount };
-  } catch (error) {
-    // jsonc-parser recursively builds its AST. Never reinterpret an inner
-    // fragment when the complete value only failed because the call stack was
-    // exhausted: that would silently show different JSON than the input.
-    if (error instanceof RangeError) {
-      throw new JsonNestingTooDeepError();
+  return parseCompleteJsonTree(raw, maxValueNodes);
+}
+
+/**
+ * Single-pass iterative JSONC parser built directly on jsonc-parser's scanner.
+ * Avoids building a recursive jsonc-parser AST or running a separate
+ * complexity pre-scan for valid JSONC documents.
+ */
+function parseCompleteJsonTree(
+  raw: string,
+  maxValueNodes: number,
+): { ok: true; tree: JsonTreeNode; nodeCount: number } | { ok: false } {
+  const scanner = createScanner(raw, false);
+  let valueNodes = 0;
+  let nextId = 0;
+
+  interface ContainerFrame {
+    node: JsonTreeNode;
+    kind: "object" | "array";
+    state: "keyOrClose" | "colon" | "value" | "commaOrClose" | "valueOrClose";
+    pendingKey?: { key: string; rawKey: string; keyOffset: number };
+  }
+
+  const stack: ContainerFrame[] = [];
+  let root: JsonTreeNode | undefined;
+
+  const failWithDepthCheck = (pendingToken?: SyntaxKind): { ok: false } => {
+    const depth = stack.length;
+    finishDepthCheck(scanner, depth, depth > MAX_JSON_NESTING, pendingToken);
+    return { ok: false };
+  };
+
+  const nextToken = (): SyntaxKind | -1 => {
+    for (;;) {
+      const token = scanner.scan();
+      if (scanner.getTokenError() !== ScanError.None || token === SyntaxKind.Unknown) {
+        return -1;
+      }
+      if (
+        token === SyntaxKind.Trivia ||
+        token === SyntaxKind.LineBreakTrivia ||
+        token === SyntaxKind.LineCommentTrivia ||
+        token === SyntaxKind.BlockCommentTrivia
+      ) {
+        continue;
+      }
+      return token;
     }
-    throw error;
+  };
+
+  const allocNode = (
+    type: JsonTreeNode["type"],
+    offset: number,
+    length: number,
+  ): JsonTreeNode => {
+    valueNodes += 1;
+    if (valueNodes > maxValueNodes) {
+      throw new JsonValueNodeLimitError(maxValueNodes);
+    }
+    const node: JsonTreeNode = { id: nextId, type, offset, length };
+    nextId += 1;
+    return node;
+  };
+
+  const attachValue = (valueNode: JsonTreeNode): boolean => {
+    if (stack.length === 0) {
+      if (root !== undefined) return false;
+      root = valueNode;
+      return true;
+    }
+    const frame = stack[stack.length - 1];
+    if (frame.kind === "object") {
+      const pendingKey = frame.pendingKey;
+      if (pendingKey === undefined) return false;
+      frame.node.children!.push({
+        key: pendingKey.key,
+        rawKey: pendingKey.rawKey,
+        keyOffset: pendingKey.keyOffset,
+        value: valueNode,
+      });
+      frame.pendingKey = undefined;
+      frame.state = "commaOrClose";
+    } else {
+      const children = frame.node.children!;
+      children.push({ key: children.length, value: valueNode });
+      frame.state = "commaOrClose";
+    }
+    return true;
+  };
+
+  for (;;) {
+    const token = nextToken();
+    if (token === -1) {
+      return failWithDepthCheck(scanner.getToken());
+    }
+    if (token === SyntaxKind.EOF) {
+      if (stack.length > 0 || root === undefined) return { ok: false };
+      return { ok: true, tree: root, nodeCount: valueNodes };
+    }
+
+    if (stack.length === 0) {
+      if (root !== undefined) {
+        return failWithDepthCheck(token);
+      }
+    } else {
+      const top = stack[stack.length - 1];
+      if (top.kind === "object") {
+        if (top.state === "keyOrClose") {
+          if (token === SyntaxKind.CloseBraceToken) {
+            const closeEnd = scanner.getTokenOffset() + scanner.getTokenLength();
+            top.node.length = closeEnd - (top.node.offset as number);
+            stack.pop();
+            if (stack.length > 0) stack[stack.length - 1].state = "commaOrClose";
+            continue;
+          }
+          if (token !== SyntaxKind.StringLiteral) {
+            return failWithDepthCheck(token);
+          }
+          const offset = scanner.getTokenOffset();
+          const length = scanner.getTokenLength();
+          top.pendingKey = {
+            key: scanner.getTokenValue(),
+            rawKey: raw.slice(offset, offset + length),
+            keyOffset: offset,
+          };
+          top.state = "colon";
+          continue;
+        }
+        if (top.state === "colon") {
+          if (token !== SyntaxKind.ColonToken) return failWithDepthCheck(token);
+          top.state = "value";
+          continue;
+        }
+        if (top.state === "commaOrClose") {
+          if (token === SyntaxKind.CommaToken) {
+            top.state = "keyOrClose";
+            continue;
+          }
+          if (token === SyntaxKind.CloseBraceToken) {
+            const closeEnd = scanner.getTokenOffset() + scanner.getTokenLength();
+            top.node.length = closeEnd - (top.node.offset as number);
+            stack.pop();
+            if (stack.length > 0) stack[stack.length - 1].state = "commaOrClose";
+            continue;
+          }
+          return failWithDepthCheck(token);
+        }
+      } else if (top.state === "valueOrClose") {
+        if (token === SyntaxKind.CloseBracketToken) {
+          const closeEnd = scanner.getTokenOffset() + scanner.getTokenLength();
+          top.node.length = closeEnd - (top.node.offset as number);
+          stack.pop();
+          if (stack.length > 0) stack[stack.length - 1].state = "commaOrClose";
+          continue;
+        }
+      } else if (top.state === "commaOrClose") {
+        if (token === SyntaxKind.CommaToken) {
+          top.state = "valueOrClose";
+          continue;
+        }
+        if (token === SyntaxKind.CloseBracketToken) {
+          const closeEnd = scanner.getTokenOffset() + scanner.getTokenLength();
+          top.node.length = closeEnd - (top.node.offset as number);
+          stack.pop();
+          if (stack.length > 0) stack[stack.length - 1].state = "commaOrClose";
+          continue;
+        }
+        return failWithDepthCheck(token);
+      }
+    }
+
+    const offset = scanner.getTokenOffset();
+    const length = scanner.getTokenLength();
+    if (token === SyntaxKind.OpenBraceToken) {
+      const node = allocNode("object", offset, -1);
+      node.children = [];
+      if (!attachValue(node)) return failWithDepthCheck(token);
+      stack.push({ node, kind: "object", state: "keyOrClose" });
+      if (stack.length > MAX_JSON_NESTING) {
+        return failWithDepthCheck();
+      }
+    } else if (token === SyntaxKind.OpenBracketToken) {
+      const node = allocNode("array", offset, -1);
+      node.children = [];
+      if (!attachValue(node)) return failWithDepthCheck(token);
+      stack.push({ node, kind: "array", state: "valueOrClose" });
+      if (stack.length > MAX_JSON_NESTING) {
+        return failWithDepthCheck();
+      }
+    } else if (token === SyntaxKind.StringLiteral) {
+      const node = allocNode("string", offset, length);
+      node.raw = raw.slice(offset, offset + length);
+      node.value = scanner.getTokenValue();
+      if (!attachValue(node)) return failWithDepthCheck(token);
+    } else if (token === SyntaxKind.NumericLiteral) {
+      if (Number.isNaN(Number(scanner.getTokenValue()))) {
+        return failWithDepthCheck(token);
+      }
+      const node = allocNode("number", offset, length);
+      node.raw = raw.slice(offset, offset + length);
+      if (!attachValue(node)) return failWithDepthCheck(token);
+    } else if (token === SyntaxKind.TrueKeyword) {
+      const node = allocNode("boolean", offset, length);
+      node.raw = raw.slice(offset, offset + length);
+      node.value = true;
+      if (!attachValue(node)) return failWithDepthCheck(token);
+    } else if (token === SyntaxKind.FalseKeyword) {
+      const node = allocNode("boolean", offset, length);
+      node.raw = raw.slice(offset, offset + length);
+      node.value = false;
+      if (!attachValue(node)) return failWithDepthCheck(token);
+    } else if (token === SyntaxKind.NullKeyword) {
+      const node = allocNode("null", offset, length);
+      node.raw = raw.slice(offset, offset + length);
+      node.value = null;
+      if (!attachValue(node)) return failWithDepthCheck(token);
+    } else {
+      return failWithDepthCheck(token);
+    }
+  }
+}
+
+function finishDepthCheck(
+  scanner: ReturnType<typeof createScanner>,
+  initialDepth: number,
+  initialExceeded: boolean,
+  pendingToken?: SyntaxKind,
+): void {
+  let depth = initialDepth;
+  let exceededNesting = initialExceeded;
+  const handle = (token: SyntaxKind): void => {
+    if (token === SyntaxKind.OpenBraceToken || token === SyntaxKind.OpenBracketToken) {
+      depth += 1;
+      if (depth > MAX_JSON_NESTING) exceededNesting = true;
+    } else if ((token === SyntaxKind.CloseBraceToken || token === SyntaxKind.CloseBracketToken) && depth > 0) {
+      depth -= 1;
+    }
+  };
+  if (pendingToken !== undefined) handle(pendingToken);
+  for (let token = scanner.scan(); token !== SyntaxKind.EOF; token = scanner.scan()) {
+    handle(token);
+  }
+  if (exceededNesting && depth === 0) {
+    throw new JsonNestingTooDeepError();
   }
 }
 

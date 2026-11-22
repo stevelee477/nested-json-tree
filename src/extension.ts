@@ -1,11 +1,11 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
+import { disposeParseWorker, parseJsonCandidatesAsync } from "./asyncParser";
 import {
   JsonCandidate,
   JsonProcessingLimitError,
   assertInputSize,
   candidatePreview,
-  parseJsonCandidates,
 } from "./parser";
 import { describeLimitError, getParseOptions, reportUnexpectedError } from "./settings";
 import {
@@ -40,7 +40,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   return { readyWebviewCount: getReadyWebviewCount, panels: getPanelTestHandles };
 }
 
-export function deactivate(): void {}
+export function deactivate(): Promise<void> {
+  return disposeParseWorker();
+}
 
 async function openDocument(): Promise<void> {
   const editor = vscode.window.activeTextEditor;
@@ -134,7 +136,7 @@ async function parseAndOpen(
 ): Promise<void> {
   let candidates: JsonCandidate[];
   try {
-    candidates = parseJsonCandidates(text, getParseOptions());
+    candidates = await parseJsonCandidatesAsync(text, getParseOptions());
   } catch (error) {
     if (error instanceof JsonProcessingLimitError) {
       void vscode.window.showErrorMessage(describeLimitError(error));

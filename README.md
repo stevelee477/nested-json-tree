@@ -20,21 +20,21 @@ Nested JSON Tree is a read-only viewer for the JSON that ordinary formatters str
 
 ## Highlights
 
-- Open a JSON/JSONC document, a selection, or the clipboard as a collapsible tree.
-- Expand escaped JSON strings **inline**, level after level, without leaving the tree.
-- Keep the tree in sync with the editor: reveal any node in the source, highlight the node under the cursor, and refresh automatically as you edit.
+- Open a JSON/JSONC document, a selection, or the clipboard as a collapsible, virtual-scrolled tree.
+- Expand escaped JSON strings, **JWT** tokens, **URL query strings**, and **Base64 / Base64URL** payloads (JSON, Protobuf wire format, or readable text) **inline**, level after level, without leaving the tree.
+- Keep the tree in sync with the editor: reveal any node in the source, highlight the node under the cursor, and refresh automatically as you edit (large documents parse off the Extension Host thread).
 - Accept JSONC line/block comments and trailing commas.
 - Extract valid JSON even when unrelated text appears before or after it.
-- Navigate valid JSONL/NDJSON records in one Tree View without loading the whole document into the parser.
-- Right-click a string and recursively open escaped or double-encoded JSON.
-- Decode, parse, format, and open nested JSON in a normal untitled editor.
+- Navigate valid JSONL/NDJSON records in one Tree View without loading the whole document into the parser, filter records by text or `key=value`, list matches, preserve expanded/decoded paths across lines (**Keep view**), or inspect records in **Table view**.
+- Right-click any string to recursively open escaped JSON or supported encoded payloads, or right-click any object/array to open a subtree as a new tree, format it in a new editor, or view object arrays as a sortable/filterable table with CSV export.
 - Open any decoded string as plain text, preserving real newlines and other decoded characters without requiring JSON.
 - Preserve large integers and original tokens such as `"\u0061"` and `"\/"` in display, search, copy, and formatting.
 - Search decoded and raw keys/values incrementally, filter unrelated branches, and navigate results.
+- Navigate via a live **breadcrumb bar**, hover quick-action buttons, depth-level expansion, subtree/sibling controls, collapsed container previews, non-destructive `A→Z` key sorting, and `Cmd/Ctrl+C` / `Shift+Cmd/Ctrl+C` copy shortcuts.
 - Copy lossless values, decoded strings, exact escaped string literals, JSONPath, and jq filters.
 - Choose between multiple detected JSON candidates.
-- Automatically expand small trees; keep large trees manageable.
-- See readable hints for Unix timestamps, color values, string lengths, and links.
+- Automatically expand small trees; keep large trees fast and responsive.
+- Convert and display readable local & relative times for Unix timestamps (seconds, milliseconds, microseconds, nanoseconds) and **ISO-8601** date-time strings, highlight expired `exp` timestamps, show color swatches, string lengths, and clickable links.
 - English and Simplified Chinese UI, following VS Code's display language.
 
 <a href="assets/screenshots/zh-cn.png"><img src="assets/screenshots/zh-cn.png" width="760" alt="Simplified Chinese Tree View with its actions menu"></a>
@@ -45,21 +45,26 @@ Damaged input such as `{"id":7,"broken":undefined,"ok":true}` can retain the con
 
 Recovered trees display **Recovered partial JSON**; the picker labels them **recovered subset**. The warning tooltip includes bounded diagnostics with character positions relative to the candidate source. Copy/open produces the recovered subset, **not the complete original JSON**. Damaged array elements are omitted, so recovered array indices may differ from the source. The original file is never modified.
 
-**Expand all** shares bounded time/node slices across small containers instead of waiting one timer turn per object. **Collapse all** cancels expansion, and search can interrupt it. The 10,000-node bulk-expansion safety limit remains; larger trees can still be expanded manually in chunks.
+**Expand all** expands up to 100,000 nodes cleanly in a virtual-scrolled Tree View (yielding in bounded chunks so **Collapse all** or search can interrupt it at any time). Larger trees can still be expanded by depth or manually branch by branch.
 
-## Nested JSON
+## Nested JSON & Inline Decoding
 
-Strings that contain a JSON object or array show an expand arrow. Click it (or press `→`) to decode the string **inline**: the parsed value appears as a **decoded JSON** child, double-encoded strings are unwrapped automatically, and the decoded value can contain further encoded strings. Search covers decoded content, and **Copy jq path** produces a runnable filter such as `.payload | fromjson | .user.id`. JSONPath cannot cross an encoded string, so it is copied relative to the decoded value.
+Strings that contain structured payloads show an expand arrow. Click it (or press `→`) to decode the string **inline**:
+
+- **Escaped JSON**: appears as a **decoded JSON** child; double-encoded strings unwrap automatically, and nested encoded strings can be expanded further. Search covers decoded content, and **Copy jq path** produces a runnable filter such as `.payload | fromjson | .user.id`. JSONPath cannot cross an encoded string, so it is copied relative to the decoded value.
+- **JWT**: decodes into `header`, `payload`, and `signature` (with expiry status on `exp` claims).
+- **URL query strings**: splits `origin`, `pathname`, `params` (preserving duplicate parameter keys), and `hash`.
+- **Base64 / Base64URL**: automatically detects Base64-encoded JSON, **Protobuf wire format** (field numbers, varints, packed repeated varints, 32/64-bit fixed/floats, nested messages, repeated fields, UTF-8 strings, and hex bytes), and readable UTF-8 text.
 
 <a href="assets/screenshots/inline-decoding.png"><img src="assets/screenshots/inline-decoding.png" width="760" alt="Escaped JSON strings decoded inline, with timestamp and color hints"></a>
 
-Strings that carry JSON inside other text, such as `retrying: {"attempt": 2}`, can be expanded too; they are labeled **decoded JSON (from text)**, and a copied jq path warns that `fromjson` cannot parse such a string as is. Turn on **{}** in the search bar to decode every embedded-JSON string before searching (up to 2,000 strings per tree).
+Strings that carry JSON inside other text, such as `retrying: {"attempt": 2}`, can be expanded too; they are labeled **decoded JSON (from text)**, and a copied jq path warns that `fromjson` cannot parse such a string as is. Turn on **{}** in the search bar to decode every supported encoded string (JSON, JWT, URL, Base64) before searching (up to 2,000 strings per tree).
 
-Right-click any string node to open its JSON in a separate tree instead. The new tree supports the same actions, so nesting can be explored repeatedly.
+Right-click any string node to open its nested JSON or decoded payload in a separate tree tab instead. The new tree supports the same actions, so nesting can be explored repeatedly.
 
 <a href="assets/screenshots/nested-json-menu.png"><img src="assets/screenshots/nested-json-menu.png" width="1000" alt="Open escaped nested JSON"></a>
 
-Choose **Open parsed JSON in new editor** to decode and format the value as a normal JSON document, or **Open decoded string value in new editor** to open the decoded text unchanged in a plain-text editor.
+Choose **Open parsed JSON in new editor** to decode and format the value as a normal JSON document (or plain text for Base64 text), or **Open decoded string value in new editor** to open the decoded text unchanged in a plain-text editor. Any object or array node can also be opened as its own tree (**Open subtree as new tree**) or formatted into a new editor (**Open formatted JSON in new editor**), and object arrays can be inspected with **View as table**.
 
 ## JSONL / NDJSON
 
@@ -67,7 +72,7 @@ Place the cursor on a record and select **Nested JSON Tree: Open Current Line as
 
 <a href="assets/screenshots/jsonl-current-line.png"><img src="assets/screenshots/jsonl-current-line.png" width="1000" alt="Navigate a JSONL file"></a>
 
-The Tree View keeps the source URI and current line. Use **Prev**, **Next**, or a line number to jump between valid records in the same tab; empty, invalid, and resource-limited lines are skipped. **Source** reveals the current record in the editor. **Follow cursor** is optional and off by default.
+The Tree View keeps the source URI and current line. Use **Prev**, **Next**, or a line number to jump between valid records in the same tab; empty, invalid, and resource-limited lines are skipped. **Keep view** (on by default) preserves your expanded branches, inline-decoded strings, and search query as you step between records. Use the **Filter** box (`text`, `"quoted phrase"`, or `key=value` / `a.b=value`; press `Enter` / `Shift+Enter` for next/previous match) and **List** to pick from matching lines, or click **Table** to inspect up to 500 matching records side by side with column sorting, row filtering, click-to-jump, and CSV copy/export. **Source** reveals the current record in the editor. **Follow cursor** is optional and off by default.
 
 Editor context-menu entries appear only for JSON/JSONC and JSONL/NDJSON files. Both commands remain available through `Cmd+Shift+P` / `Ctrl+Shift+P` for text and log files. With **Follow cursor** on, the node under the cursor is also highlighted within the current line.
 
@@ -108,16 +113,19 @@ code --install-extension nested-json-tree-<version>.vsix
 
 ## Tree controls
 
-- **Expand all / Collapse all** controls every container at once; **Expand all** is limited to 10,000 nodes.
-- `Cmd+F` / `Ctrl+F` focuses tree search.
+- **Expand all / Collapse all** controls every container at once (**Expand all** supports up to 100,000 nodes with virtual scrolling). Use the **Depth…** selector to expand cleanly to Level 1–5, or right-click to **Expand subtree**, **Collapse subtree**, or **Collapse sibling branches**.
+- **A→Z** sorts object keys alphabetically for display without altering array order or copy/source paths. Collapsed objects and arrays display an inline preview of their first entries.
+- **Breadcrumb bar**: shows the path to the focused node with clickable segments to jump up and one-click **JSONPath** / **jq** copy buttons.
+- **Hover / keyboard quick actions**: hover or focus a row for quick buttons (`{}`, `Copy`, `$.`, `↗`), or press `Cmd/Ctrl+C` to copy the focused node's value and `Shift+Cmd/Ctrl+C` to copy its JSONPath.
+- `Cmd+F` / `Ctrl+F` focuses tree search (or table filter when Table view is open).
 - `Enter` and `Shift+Enter` move through search results.
 - `Esc` clears search and restores the previous expansion state.
 - While search results are shown, branches can still be expanded or collapsed, and **Collapse all** stays available.
-- Right-click a node (or press `Shift+F10`) to copy its value, key, JSONPath, or jq path.
-- Keyboard: `↑`/`↓` move between rows, `→`/`←` expand/collapse or move to the child/parent, `Home`/`End` jump to the first/last row, `Enter`/`Space` toggle a container or open the actions menu.
-- Expansion, search text, and scroll position are restored when you return to a hidden Tree View tab.
+- Right-click a node (or press `Shift+F10`) to copy its value, key, JSONPath, or jq path, open subtrees as a new tree or formatted JSON editor, or open an array of objects in **Table view** (sortable columns, row filter, click row to jump, **Copy CSV** / **Open CSV**).
+- Keyboard: `↑`/`↓` move between rows, `PageUp`/`PageDown` jump by page, `→`/`←` expand/collapse or move to the child/parent, `Home`/`End` jump to the first/last row, `Enter`/`Space` toggle a container or open the actions menu.
+- Expansion, search text, sort toggle, and scroll position are restored when you return to a hidden Tree View tab.
 - String-node actions can open parsed JSON or open the decoded value unchanged as plain text.
-- Hover a value for hints: Unix timestamps in seconds or milliseconds show their UTC and local time (inline as well, when the key looks like a time such as `createdAt` or `ts`); strings show their length; colors such as `#3b82f6` or `rgb(…)` get a swatch; `Cmd`/`Ctrl`+click opens an `http(s)` link.
+- Value hints & timestamp conversion: Unix timestamps (seconds, milliseconds, microseconds, nanoseconds — numeric or string-encoded) and **ISO-8601** date-time strings display converted local time and relative time (`3m ago`, `in 2d`, plus `expired` warnings on past `exp`/`expiresAt` fields), with UTC, local, and relative time in the tooltip; strings show their length; colors such as `#3b82f6` or `rgb(…)` get a swatch; `Cmd`/`Ctrl`+click opens an `http(s)` link.
 
 Example jq path:
 
@@ -129,7 +137,7 @@ Example jq path:
 
 | Setting | Default | Description |
 | --- | ---: | --- |
-| `nestedJsonTree.autoExpandMaxNodes` | `200` | Fully expand trees at or below this node count. Set to `0` to disable automatic descendant expansion; roots above the 10,000-node materialization limit remain collapsed. |
+| `nestedJsonTree.autoExpandMaxNodes` | `200` | Fully expand trees at or below this node count. Set to `0` to disable automatic descendant expansion; roots above the 100,000-node bulk-expansion limit remain collapsed. |
 | `nestedJsonTree.liveRefreshMaxCharacters` | `500000` | Re-parse document and selection trees automatically after edits up to this many characters; larger text shows **Refresh**. `0` always refreshes manually. |
 | `nestedJsonTree.maxValueNodes` | `500000` | Maximum JSON value nodes parsed for one document or tree (10,000–5,000,000). Each million nodes uses roughly 250 MB of Extension Host memory. |
 

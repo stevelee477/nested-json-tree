@@ -1,5 +1,5 @@
 import type { JsonTreeDecodableKind, JsonTreeDecodedKind } from "./jsonTree";
-import { decodePrintableUtf8, decodeProtobufMessage } from "./protobuf";
+import { decodePrintableUtf8, inspectProtobufWire } from "./protobuf";
 
 export const MAX_INLINE_BASE64_CHARS = 2 * 1024 * 1024;
 export const MAX_INLINE_JWT_CHARS = 64 * 1024;
@@ -79,10 +79,10 @@ export function isValidBase64Syntax(text: string): boolean {
   return hasUrl ? /^[A-Za-z0-9_-]+$/.test(text) : /^[A-Za-z0-9+/]+$/.test(text);
 }
 
-/** Filters out ordinary English words and hex hashes before attempting Base64 decode. */
+/** Filters out ordinary English words, lowercase hyphenated slugs, and hex hashes before attempting Base64 decode. */
 export function isLikelyPlainWordOrHash(text: string): boolean {
   if (text.endsWith("=")) return false;
-  if (/^[a-z]+$/.test(text) || /^\d+$/.test(text)) return true;
+  if (/^[a-z]+$/.test(text) || /^\d+$/.test(text) || /^[a-z]+(?:-[a-z0-9]+)+$/.test(text)) return true;
   if (
     (text.length === 16 || text.length === 32 || text.length === 40 || text.length === 64 || text.length === 128) &&
     /^[0-9a-fA-F]+$/.test(text)
@@ -147,17 +147,60 @@ export function isPlausibleProtobufResult(
   return true;
 }
 
+function base64Sextet(code: number, allowUrl: boolean, allowStd: boolean): number {
+  if (code >= 0x41 && code <= 0x5a) return code - 0x41;
+  if (code >= 0x61 && code <= 0x7a) return code - 0x47;
+  if (code >= 0x30 && code <= 0x39) return code + 4;
+  if ((allowStd && code === 0x2b) || (allowUrl && code === 0x2d)) return 62;
+  if ((allowStd && code === 0x2f) || (allowUrl && code === 0x5f)) return 63;
+  return -1;
+}
+
 /** Decodes strict Base64 or Base64URL into bytes, rejecting non-canonical padding/bits. */
 export function decodeBase64Bytes(text: string): Uint8Array | undefined {
-  if (text.length === 0 || text.length % 4 === 1) return undefined;
-  const normalized = text.replace(/-/g, "+").replace(/_/g, "/");
-  const remainder = normalized.length % 4;
-  const padded = remainder === 0 ? normalized : normalized + "=".repeat(4 - remainder);
-  const buf = Buffer.from(padded, "base64");
-  if (buf.length === 0) return undefined;
-  const expectedNoPad = buf.toString("base64").replace(/=+$/, "");
-  const actualNoPad = normalized.replace(/=+$/, "");
-  if (expectedNoPad !== actualNoPad) return undefined;
+  const len = text.length;
+  if (len < 2 || len % 4 === 1) return undefined;
+
+  let pad = 0;
+  if (text.charCodeAt(len - 1) === 0x3d) {
+    if (len % 4 !== 0) return undefined;
+    pad = text.charCodeAt(len - 2) === 0x3d ? 2 : 1;
+  }
+  const unpaddedLen = len - pad;
+  if (unpaddedLen < 2 || unpaddedLen % 4 === 1) return undefined;
+
+  let hasStd = false;
+  let hasUrl = false;
+  let lastSextet = 0;
+  for (let index = 0; index < unpaddedLen; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code === 0x2b || code === 0x2f) {
+      if (hasUrl) return undefined;
+      hasStd = true;
+    } else if (code === 0x2d || code === 0x5f) {
+      if (hasStd) return undefined;
+      hasUrl = true;
+    }
+    const sextet = base64Sextet(code, !hasStd, !hasUrl);
+    if (sextet < 0) return undefined;
+    lastSextet = sextet;
+  }
+
+  const mod = unpaddedLen % 4;
+  if (mod === 2 && (lastSextet & 0x0f) !== 0) return undefined;
+  if (mod === 3 && (lastSextet & 0x03) !== 0) return undefined;
+
+  const expectedBytes = Math.floor((unpaddedLen * 3) / 4);
+  if (expectedBytes === 0) return undefined;
+
+  let buf: Buffer;
+  if (hasUrl) {
+    buf = Buffer.from(pad === 0 ? text : text.slice(0, unpaddedLen), "base64url");
+  } else {
+    const padded = mod === 0 ? text : text + "=".repeat(4 - mod);
+    buf = Buffer.from(padded, "base64");
+  }
+  if (buf.length !== expectedBytes) return undefined;
   return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 }
 
@@ -186,13 +229,13 @@ function looksLikeDecodableBase64(trimmed: string): boolean {
       }
     }
     if (startsWithPbTagWhitespace(bytes)) {
-      const pb = decodeProtobufMessage(bytes, { maxValueNodes: 20_000 });
+      const pb = inspectProtobufWire(bytes, { maxValueNodes: 20_000 });
       if (pb !== undefined && isPlausibleProtobufResult(trimmed, bytes, pb)) return true;
     }
     return isPlausibleBase64Text(trimmed, printable);
   }
 
-  const pb = decodeProtobufMessage(bytes, { maxValueNodes: 20_000 });
+  const pb = inspectProtobufWire(bytes, { maxValueNodes: 20_000 });
   return pb !== undefined && isPlausibleProtobufResult(trimmed, bytes, pb);
 }
 

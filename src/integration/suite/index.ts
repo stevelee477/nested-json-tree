@@ -35,6 +35,9 @@ export async function run(): Promise<void> {
   await verifySelectionTracksEdits(api);
   await verifyJsonlLineTracksEdits(api);
   await verifyEmbeddedJsonAndSearchDecoding(api);
+  await verifyContainerAndEncodedOpenActions(api);
+  await verifyJsonlFilterAndKeepView(api);
+  await verifyLargeWorkerDocument(api);
 }
 
 /** Polls a fresh handle for the newest panel with this title. */
@@ -333,4 +336,120 @@ async function verifyRecoveredDocumentCommand(): Promise<void> {
   await vscode.commands.executeCommand(OPEN_DOCUMENT_COMMAND);
   const tab = await waitForViewerTab((candidate) => candidate.label === expectedLabel, existingCount);
   assert.equal(isViewerViewType(tab.input.viewType), true);
+}
+
+async function verifyContainerAndEncodedOpenActions(api: ExtensionTestApi): Promise<void> {
+  const b64Payload = Buffer.from(JSON.stringify({ decodedByMenu: true }), "utf8").toString("base64");
+  const content = JSON.stringify({
+    sub: { nestedKey: 42 },
+    rows: [{ id: 1, name: "a" }, { id: 2, name: "b" }],
+    b64: b64Payload,
+  });
+  const document = await vscode.workspace.openTextDocument({ language: "json", content });
+  await vscode.window.showTextDocument(document, { preview: false, viewColumn: vscode.ViewColumn.One });
+  await waitFor(
+    () => (vscode.window.activeTextEditor?.document === document ? true : undefined),
+    "the container actions editor to become active",
+  );
+  const beforeCount = api.panels().length;
+  await vscode.commands.executeCommand(OPEN_DOCUMENT_COMMAND);
+  const panel = await waitFor(
+    () => (api.panels().length > beforeCount ? api.panels().at(-1) : undefined),
+    "the container actions panel",
+  );
+
+  const sub = childValue(panel.tree, "sub");
+  const subCount = api.panels().length;
+  await panel.runNodeAction("openSubtree", sub.id);
+  const subPanel = await waitFor(
+    () => (api.panels().length > subCount ? api.panels().at(-1) : undefined),
+    "the subtree panel",
+  );
+  assert.equal(subPanel.title, vscode.l10n.t("JSON Subtree · {0}", "$.sub"));
+  assert.equal(childValue(subPanel.tree, "nestedKey").raw, "42");
+
+  await panel.runNodeAction("openFormattedJson", sub.id);
+  const formattedDoc = await waitFor(
+    () => vscode.workspace.textDocuments.find((doc) => doc.getText().includes('"nestedKey": 42')),
+    "the formatted JSON document",
+  );
+  assert.equal(formattedDoc.languageId, "json");
+
+  const b64 = childValue(panel.tree, "b64");
+  const b64Count = api.panels().length;
+  await panel.runNodeAction("openNested", b64.id);
+  const b64Panel = await waitFor(
+    () => (api.panels().length > b64Count ? api.panels().at(-1) : undefined),
+    "the decoded Base64 panel",
+  );
+  assert.equal(b64Panel.title, vscode.l10n.t("Decoded · {0}", "$.b64"));
+  assert.equal(childValue(b64Panel.tree, "decodedByMenu").raw, "true");
+
+  const rows = childValue(panel.tree, "rows");
+  await panel.runNodeAction("openArrayTable", rows.id);
+  assert.deepEqual(panel.lastTable?.columns, ["id", "name"]);
+  assert.equal(panel.lastTable?.rows.length, 2);
+  await panel.postFromWebview({ type: "exportTable", mode: "copy", rowIndices: [0, 1] });
+  assert.equal(await vscode.env.clipboard.readText(), "id,name\n1,a\n2,b");
+}
+
+async function verifyJsonlFilterAndKeepView(api: ExtensionTestApi): Promise<void> {
+  const lines = [
+    JSON.stringify({ level: "ERROR", payload: JSON.stringify({ step: 1 }) }),
+    JSON.stringify({ level: "INFO", payload: JSON.stringify({ step: 2 }) }),
+    JSON.stringify({ level: "ERROR", payload: JSON.stringify({ step: 3 }) }),
+  ].join("\n");
+  const document = await vscode.workspace.openTextDocument({ language: "plaintext", content: lines });
+  const editor = await vscode.window.showTextDocument(document, { preview: false, viewColumn: vscode.ViewColumn.One });
+  await waitFor(
+    () => (vscode.window.activeTextEditor?.document === document ? true : undefined),
+    "the JSONL filter editor to become active",
+  );
+  editor.selection = new vscode.Selection(0, 0, 0, 0);
+  const beforeCount = api.panels().length;
+  await vscode.commands.executeCommand(OPEN_CURRENT_LINE_COMMAND);
+  const panel = await waitFor(
+    () => (api.panels().length > beforeCount ? api.panels().at(-1) : undefined),
+    "the JSONL filter panel",
+  );
+
+  await panel.runNodeAction("expandDecoded", childValue(panel.tree, "payload").id);
+  assert.equal(childValue(childValue(panel.tree, "payload").decoded!.root, "step").raw, "1");
+
+  await panel.postFromWebview({ type: "nextJsonl", query: "level=ERROR" });
+  const updated = await waitFor(
+    () => api.panels().slice(beforeCount).find((p) => p.lineNumber === 2),
+    "filtered JSONL navigation to skip INFO line",
+  );
+  const payload = childValue(updated.tree, "payload");
+  assert.ok(payload.decoded, "keepView should preserve inline-decoded payload across lines");
+  assert.equal(childValue(payload.decoded.root, "step").raw, "3");
+
+  await updated.postFromWebview({ type: "openJsonlTable", query: "level=ERROR" });
+  assert.equal(updated.lastTable?.rows.length, 2);
+  assert.deepEqual(updated.lastTable?.rows.map((r) => r.rowLabel), ["1", "3"]);
+}
+
+async function verifyLargeWorkerDocument(api: ExtensionTestApi): Promise<void> {
+  const rows = 130;
+  const perRow = 1_000;
+  const count = rows * perRow;
+  const line = `${"1,".repeat(perRow - 1)}1`;
+  const content = `{"items":[\n${Array.from({ length: rows }, () => line).join(",\n")}\n]}`;
+  assert.ok(content.length >= 250_000, "large test document should exceed worker threshold");
+  const document = await vscode.workspace.openTextDocument({ language: "json", content });
+  await vscode.window.showTextDocument(document, { preview: false, viewColumn: vscode.ViewColumn.One });
+  await waitFor(
+    () => (vscode.window.activeTextEditor?.document === document ? true : undefined),
+    "the large document editor to become active",
+  );
+  const beforeCount = api.panels().length;
+  await vscode.commands.executeCommand(OPEN_DOCUMENT_COMMAND);
+  const panel = await waitFor(
+    () => (api.panels().length > beforeCount ? api.panels().at(-1) : undefined),
+    "the worker-parsed large document panel",
+  );
+  const keys = panel.tree.children?.map((c) => String(c.key)) ?? [];
+  assert.ok(keys.includes("items"), `expected child items in ${panel.title}, got keys: ${keys.join(", ")}`);
+  assert.equal(childValue(panel.tree, "items").children?.length, count);
 }

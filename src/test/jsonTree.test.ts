@@ -7,6 +7,8 @@ import {
   assertTransferTextSize,
   buildJsonTree,
   buildJsonTreeContextIndex,
+  cachedDetectDecodableKind,
+  cloneSubtreeWithFreshIds,
   createJsonTreeWebviewModel,
   isValidJsonTreeNodeId,
   jsonTreeToValue,
@@ -295,4 +297,38 @@ test("embedded JSON detection accepts strong signals inside surrounding text", (
   for (const value of ['data: {"id": 1}', 'got {"a":1} from upstream', 'rows=[{"x":1}]', 'tags: ["a", "b"] end']) {
     assert.equal(looksLikeEmbeddedJson(value), true, value);
   }
+});
+
+test("cachedDetectDecodableKind caches string kind and clears once decoded is attached", () => {
+  const root = parseLosslessly('{"payload":"{\\"ok\\":true}","plain":"hello"}');
+  const payload = root.children![0].value;
+  const plain = root.children![1].value;
+  assert.equal(cachedDetectDecodableKind(payload), "json");
+  assert.equal(cachedDetectDecodableKind(payload), "json");
+  assert.equal(cachedDetectDecodableKind(plain), undefined);
+  assert.equal(cachedDetectDecodableKind(plain), undefined);
+  buildJsonTreeContextIndex(root).attachDecoded(payload.id, decodedFrom('{"ok":true}'));
+  assert.equal(cachedDetectDecodableKind(payload), undefined);
+});
+
+test("cloneSubtreeWithFreshIds renumbers nodes, preserves decoded subtrees, and handles deep trees", () => {
+  const root = parseLosslessly('{"wrap":{"a":9007199254740993,"b":"{\\"inner\\":1}"}}');
+  const wrap = root.children![0].value;
+  buildJsonTreeContextIndex(root).attachDecoded(wrap.children![1].value.id, decodedFrom('{"inner":1}'));
+
+  const cloned = cloneSubtreeWithFreshIds(wrap);
+  assert.equal(cloned.tree.id, 0);
+  assert.equal(cloned.tree.offset, undefined);
+  assert.equal(cloned.tree.children![0].value.raw, "9007199254740993");
+  assert.equal(cloned.tree.children![1].value.decoded?.root.children?.[0].value.raw, "1");
+  const rebuilt = buildJsonTreeContextIndex(cloned.tree);
+  assert.equal(rebuilt.size, cloned.nodeCount);
+
+  let deep: JsonTreeNode = { id: 99, type: "number", raw: "1" };
+  for (let i = 0; i < 15_000; i += 1) {
+    deep = { id: i + 100, type: "array", children: [{ key: 0, value: deep }] };
+  }
+  const deepClone = cloneSubtreeWithFreshIds(deep);
+  assert.equal(deepClone.nodeCount, 15_001);
+  assert.equal(deepClone.tree.id, 0);
 });

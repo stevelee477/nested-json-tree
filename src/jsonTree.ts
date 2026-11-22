@@ -4,6 +4,82 @@ import type { JsonRecovery, JsonValue } from "./parser";
 
 export { detectDecodableKind, looksLikeEmbeddedJson };
 
+const decodableKindCache = new WeakMap<JsonTreeNode, JsonTreeDecodableKind | null>();
+
+/**
+ * Memoized decodable-kind detection keyed by immutable Host JsonTreeNode.
+ * Avoids re-sniffing every string across repeated Webview model builds.
+ */
+export function cachedDetectDecodableKind(node: JsonTreeNode): JsonTreeDecodableKind | undefined {
+  if (node.type !== "string" || node.decoded !== undefined || typeof node.value !== "string") {
+    return undefined;
+  }
+  const cached = decodableKindCache.get(node);
+  if (cached !== undefined) return cached ?? undefined;
+  const detected = detectDecodableKind(node.value);
+  decodableKindCache.set(node, detected ?? null);
+  return detected;
+}
+
+/**
+ * Iteratively clones a subtree with sequential node IDs starting at 0,
+ * preserving lossless tokens and any attached inline decoded subtrees.
+ */
+export function cloneSubtreeWithFreshIds(
+  root: JsonTreeNode,
+  stripSourceOffsets = true,
+): { tree: JsonTreeNode; nodeCount: number } {
+  let nextId = 0;
+  const cloneShallow = (source: JsonTreeNode): JsonTreeNode => {
+    const copy: JsonTreeNode = { id: nextId, type: source.type };
+    nextId += 1;
+    if (source.raw !== undefined) copy.raw = source.raw;
+    if (source.value !== undefined) copy.value = source.value;
+    if (!stripSourceOffsets) {
+      if (source.offset !== undefined) copy.offset = source.offset;
+      if (source.length !== undefined) copy.length = source.length;
+    }
+    if (source.children !== undefined) copy.children = [];
+    return copy;
+  };
+
+  const clonedRoot = cloneShallow(root);
+  const pending: Array<{ source: JsonTreeNode; target: JsonTreeNode }> = [
+    { source: root, target: clonedRoot },
+  ];
+  while (pending.length > 0) {
+    const { source, target } = pending.pop()!;
+    if (source.decoded !== undefined) {
+      const decodedRoot = cloneShallow(source.decoded.root);
+      target.decoded = {
+        root: decodedRoot,
+        unwrapDepth: source.decoded.unwrapDepth,
+        ...(source.decoded.kind !== undefined ? { kind: source.decoded.kind } : {}),
+        ...(source.decoded.recovery !== undefined ? { recovery: source.decoded.recovery } : {}),
+        ...(source.decoded.embedded ? { embedded: true } : {}),
+      };
+      pending.push({ source: source.decoded.root, target: decodedRoot });
+    }
+    const sourceChildren = source.children ?? [];
+    if (target.children !== undefined && sourceChildren.length > 0) {
+      for (const child of sourceChildren) {
+        const childValue = cloneShallow(child.value);
+        const clonedChild: JsonTreeChild = { key: child.key, value: childValue };
+        if (child.rawKey !== undefined) clonedChild.rawKey = child.rawKey;
+        if (!stripSourceOffsets && child.keyOffset !== undefined) clonedChild.keyOffset = child.keyOffset;
+        target.children.push(clonedChild);
+      }
+      for (let index = sourceChildren.length - 1; index >= 0; index -= 1) {
+        pending.push({
+          source: sourceChildren[index].value,
+          target: target.children[index].value,
+        });
+      }
+    }
+  }
+  return { tree: clonedRoot, nodeCount: nextId };
+}
+
 export type JsonTreeNodeType = "object" | "array" | "string" | "number" | "boolean" | "null";
 export type JsonTreeDecodableKind = "json" | "jwt" | "url" | "base64";
 export type JsonTreeDecodedKind =
@@ -552,7 +628,7 @@ export function createJsonTreeWebviewModel(
         if (node.decoded.embedded) target.decoded.embedded = true;
         pending.push({ source: node.decoded.root, target: decodedRoot });
       } else {
-        const decodableKind = detectDecodableKind(node.value);
+        const decodableKind = cachedDetectDecodableKind(node);
         if (decodableKind !== undefined) {
           target.decodable = true;
           if (decodableKind !== "json") target.decodableKind = decodableKind;

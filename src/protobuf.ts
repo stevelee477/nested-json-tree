@@ -20,6 +20,13 @@ export interface ProtobufDecodeResult {
   hasStructuredContent: boolean;
 }
 
+export interface ProtobufWireSummary {
+  fieldCount: number;
+  minTopLevelFieldNumber: number;
+  maxTopLevelFieldNumber: number;
+  hasStructuredContent: boolean;
+}
+
 interface ParsedField {
   fieldNumber: number;
   value: JsonTreeNode;
@@ -284,6 +291,21 @@ function parseMessageIterative(
         continue;
       }
 
+      const packedVarints = parsePackedVarints(slice);
+      if (packedVarints !== undefined) {
+        const packedChildren: JsonTreeChild[] = [];
+        for (let index = 0; index < packedVarints.length; index += 1) {
+          const itemNode = makeNumberNode(packedVarints[index].toString());
+          if (itemNode === undefined) return undefined;
+          packedChildren.push({ key: index, value: itemNode });
+        }
+        const arrayNode = allocNode({ type: "array", children: packedChildren });
+        if (arrayNode === undefined) return undefined;
+        hasStructuredContent = true;
+        currentFields(frame).push({ fieldNumber, value: arrayNode });
+        continue;
+      }
+
       const hexNode = makeStringNode(formatHexBytes(slice));
       if (hexNode === undefined) return undefined;
       currentFields(frame).push({ fieldNumber, value: hexNode });
@@ -319,12 +341,241 @@ function parseMessageIterative(
   return rootResult;
 }
 
+/**
+ * Zero-allocation validator and summary inspector for Protobuf wire messages.
+ * Mirrors decodeProtobufMessage's structural and budget rules without allocating
+ * JsonTreeNode objects, making hot-path Base64 sniffing much faster.
+ */
+export function inspectProtobufWire(
+  bytes: Uint8Array,
+  options: ProtobufDecodeOptions = {},
+): ProtobufWireSummary | undefined {
+  if (bytes.length < 2) return undefined;
+  const maxNodes = options.maxValueNodes !== undefined && Number.isFinite(options.maxValueNodes)
+    ? Math.max(1, Math.trunc(options.maxValueNodes))
+    : 500_000;
+  const maxDepth = options.maxDepth ?? MAX_PROTOBUF_DEPTH;
+
+  let nodeCount = 0;
+  const consumeNodes = (count = 1): boolean => {
+    nodeCount += count;
+    return nodeCount <= maxNodes;
+  };
+
+  interface InspectFrame {
+    bytes: Uint8Array;
+    offset: number;
+    end: number;
+    depth: number;
+    isNested: boolean;
+    fieldCount: number;
+    minFieldNumber: number;
+    maxFieldNumber: number;
+    groupStack: Array<{ fieldNumber: number; fieldCount: number }>;
+  }
+
+  const stack: InspectFrame[] = [{
+    bytes,
+    offset: 0,
+    end: bytes.length,
+    depth: 0,
+    isNested: false,
+    fieldCount: 0,
+    minFieldNumber: Number.POSITIVE_INFINITY,
+    maxFieldNumber: 0,
+    groupStack: [],
+  }];
+  let rootSummary: ProtobufWireSummary | undefined;
+  let hasStructuredContent = false;
+
+  const recordField = (frame: InspectFrame, fieldNumber: number): void => {
+    if (frame.groupStack.length > 0) {
+      frame.groupStack[frame.groupStack.length - 1].fieldCount += 1;
+      return;
+    }
+    frame.fieldCount += 1;
+    if (fieldNumber < frame.minFieldNumber) frame.minFieldNumber = fieldNumber;
+    if (fieldNumber > frame.maxFieldNumber) frame.maxFieldNumber = fieldNumber;
+  };
+
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1];
+    if (frame.offset === frame.end) {
+      if (frame.groupStack.length > 0 || frame.fieldCount === 0) return undefined;
+      if (!consumeNodes(1)) return undefined; // message object node
+      stack.pop();
+      if (frame.isNested) {
+        hasStructuredContent = true;
+      } else {
+        rootSummary = {
+          fieldCount: frame.fieldCount,
+          minTopLevelFieldNumber: frame.minFieldNumber,
+          maxTopLevelFieldNumber: frame.maxFieldNumber,
+          hasStructuredContent,
+        };
+      }
+      continue;
+    }
+
+    const tagRead = readVarint(frame.bytes, frame.offset, frame.end);
+    if (tagRead === undefined || tagRead.value > 0xffff_ffffn) return undefined;
+    frame.offset = tagRead.nextOffset;
+
+    const wireType = Number(tagRead.value & 7n);
+    const fieldNumber = Number(tagRead.value >> 3n);
+    if (
+      fieldNumber < 1 ||
+      fieldNumber > MAX_PROTOBUF_FIELD_NUMBER ||
+      (fieldNumber >= 19_000 && fieldNumber <= 19_999)
+    ) {
+      return undefined;
+    }
+
+    if (wireType === 0) {
+      const valRead = readVarint(frame.bytes, frame.offset, frame.end);
+      if (valRead === undefined) return undefined;
+      frame.offset = valRead.nextOffset;
+      const nodes = valRead.value >= 0x8000_0000_0000_0000n ? 3 : 1;
+      if (!consumeNodes(nodes)) return undefined;
+      recordField(frame, fieldNumber);
+    } else if (wireType === 1) {
+      if (frame.offset + 8 > frame.end) return undefined;
+      const view = new DataView(frame.bytes.buffer, frame.bytes.byteOffset + frame.offset, 8);
+      const uint64 = view.getBigUint64(0, true);
+      let nodes = 1;
+      if (uint64 !== 0n) {
+        const doubleVal = view.getFloat64(0, true);
+        const sfixed64 = view.getBigInt64(0, true);
+        const plausibleDouble =
+          Number.isFinite(doubleVal) &&
+          doubleVal !== 0 &&
+          Math.abs(doubleVal) >= 1e-12 &&
+          Math.abs(doubleVal) <= 1e15;
+        if (plausibleDouble || sfixed64 < 0n) nodes = 3;
+      }
+      frame.offset += 8;
+      if (!consumeNodes(nodes)) return undefined;
+      recordField(frame, fieldNumber);
+    } else if (wireType === 2) {
+      const lenRead = readVarint(frame.bytes, frame.offset, frame.end);
+      if (lenRead === undefined || lenRead.value > BigInt(frame.end - lenRead.nextOffset)) {
+        return undefined;
+      }
+      const length = Number(lenRead.value);
+      const start = lenRead.nextOffset;
+      const end = start + length;
+      frame.offset = end;
+      if (length === 0) {
+        if (!consumeNodes(1)) return undefined;
+        recordField(frame, fieldNumber);
+        continue;
+      }
+      const slice = frame.bytes.subarray(start, end);
+      const printable = isPrintableUtf8(slice);
+      const startsWithControlWhitespace = slice[0] === 0x09 || slice[0] === 0x0a || slice[0] === 0x0d;
+      if (printable && !startsWithControlWhitespace) {
+        if (!consumeNodes(1)) return undefined;
+        hasStructuredContent = true;
+        recordField(frame, fieldNumber);
+        continue;
+      }
+      if (frame.depth + 1 <= maxDepth && slice.length >= 2 && isValidWireMessage(slice, maxDepth - frame.depth - 1)) {
+        recordField(frame, fieldNumber);
+        stack.push({
+          bytes: slice,
+          offset: 0,
+          end: slice.length,
+          depth: frame.depth + 1,
+          isNested: true,
+          fieldCount: 0,
+          minFieldNumber: Number.POSITIVE_INFINITY,
+          maxFieldNumber: 0,
+          groupStack: [],
+        });
+        continue;
+      }
+      if (printable) {
+        if (!consumeNodes(1)) return undefined;
+        hasStructuredContent = true;
+        recordField(frame, fieldNumber);
+        continue;
+      }
+      const packed = parsePackedVarints(slice);
+      if (packed !== undefined) {
+        if (!consumeNodes(packed.length + 1)) return undefined;
+        hasStructuredContent = true;
+        recordField(frame, fieldNumber);
+        continue;
+      }
+      if (!consumeNodes(1)) return undefined;
+      recordField(frame, fieldNumber);
+    } else if (wireType === 3) {
+      if (frame.depth + frame.groupStack.length + 1 > maxDepth) return undefined;
+      frame.groupStack.push({ fieldNumber, fieldCount: 0 });
+    } else if (wireType === 4) {
+      const group = frame.groupStack.pop();
+      if (group === undefined || group.fieldNumber !== fieldNumber || group.fieldCount === 0) {
+        return undefined;
+      }
+      if (!consumeNodes(1)) return undefined;
+      hasStructuredContent = true;
+      recordField(frame, fieldNumber);
+    } else if (wireType === 5) {
+      if (frame.offset + 4 > frame.end) return undefined;
+      const view = new DataView(frame.bytes.buffer, frame.bytes.byteOffset + frame.offset, 4);
+      const uint32 = view.getUint32(0, true);
+      let nodes = 1;
+      if (uint32 !== 0) {
+        const floatVal = view.getFloat32(0, true);
+        const int32 = view.getInt32(0, true);
+        const plausibleFloat =
+          Number.isFinite(floatVal) &&
+          floatVal !== 0 &&
+          Math.abs(floatVal) >= 1e-6 &&
+          Math.abs(floatVal) <= 1e10;
+        if (plausibleFloat || int32 < 0) nodes = 3;
+      }
+      frame.offset += 4;
+      if (!consumeNodes(nodes)) return undefined;
+      recordField(frame, fieldNumber);
+    } else {
+      return undefined;
+    }
+  }
+
+  return rootSummary;
+}
+
+function parsePackedVarints(slice: Uint8Array): bigint[] | undefined {
+  if (slice.length < 3 || slice.length === 16 || slice.length === 20 || slice.length === 32) {
+    return undefined;
+  }
+  const values: bigint[] = [];
+  let offset = 0;
+  let hasNonZero = false;
+  while (offset < slice.length) {
+    const read = readVarint(slice, offset, slice.length);
+    if (read === undefined || read.value > 0xffff_ffffn) return undefined;
+    if (read.value !== 0n) hasNonZero = true;
+    values.push(read.value);
+    offset = read.nextOffset;
+  }
+  if (values.length < 3 || !hasNonZero) return undefined;
+  if (slice.length > values.length * 2) return undefined;
+  return values;
+}
+
+function isPrintableUtf8(bytes: Uint8Array): boolean {
+  return decodePrintableUtf8(bytes) !== undefined;
+}
+
 /** Fast structural validator for nested wire-format messages without building nodes. */
 function isValidWireMessage(bytes: Uint8Array, remainingDepth: number): boolean {
   if (bytes.length < 2) return false;
   let offset = 0;
   const end = bytes.length;
   let fields = 0;
+  let minFieldNumber = Number.POSITIVE_INFINITY;
   const groups: number[] = [];
 
   while (offset < end) {
@@ -340,6 +591,7 @@ function isValidWireMessage(bytes: Uint8Array, remainingDepth: number): boolean 
     ) {
       return false;
     }
+    if (fieldNumber < minFieldNumber) minFieldNumber = fieldNumber;
 
     if (wireType === 0) {
       const value = readVarint(bytes, offset, end);
@@ -366,7 +618,7 @@ function isValidWireMessage(bytes: Uint8Array, remainingDepth: number): boolean 
     fields += 1;
   }
 
-  return offset === end && groups.length === 0 && fields > 0;
+  return offset === end && groups.length === 0 && fields > 0 && minFieldNumber <= 1024;
 }
 
 function readVarint(

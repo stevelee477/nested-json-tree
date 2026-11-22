@@ -1,5 +1,6 @@
 import type { JsonTreeWebviewNode } from "./jsonTree";
 import type { JsonRecovery } from "./parser";
+import type { TableModel } from "./tableData";
 
 /** Messages shared by the Extension Host panel and the bundled Webview script. */
 
@@ -7,6 +8,9 @@ export type NodeAction =
   | "openNested"
   | "openParsedJson"
   | "openDecodedValue"
+  | "openSubtree"
+  | "openFormattedJson"
+  | "openArrayTable"
   | "copyValue"
   | "copyRawString"
   | "copyDecodedString"
@@ -22,6 +26,9 @@ export const NODE_ACTIONS: ReadonlySet<string> = new Set<NodeAction>([
   "openNested",
   "openParsedJson",
   "openDecodedValue",
+  "openSubtree",
+  "openFormattedJson",
+  "openArrayTable",
   "copyValue",
   "copyRawString",
   "copyDecodedString",
@@ -38,6 +45,8 @@ export interface JsonlViewState {
   lineNumber: number;
   lineCount: number;
   followCursor: boolean;
+  keepView?: boolean;
+  filterQuery?: string;
   status: string;
   busy?: boolean;
 }
@@ -108,6 +117,11 @@ export interface RevealNodeMessage {
   ids: number[];
 }
 
+export interface TableDataMessage {
+  type: "tableData";
+  table: TableModel;
+}
+
 export type HostToWebviewMessage =
   | RenderMessage
   | JsonlStateMessage
@@ -115,14 +129,21 @@ export type HostToWebviewMessage =
   | DecodedMessage
   | DecodeFailedMessage
   | DecodedBatchMessage
-  | RevealNodeMessage;
+  | RevealNodeMessage
+  | TableDataMessage;
 
 export type WebviewToHostMessage =
   | { type: "ready" }
   | { type: NodeAction; nodeId: number }
   | { type: "setFollowCursor"; enabled: boolean }
+  | { type: "setKeepView"; enabled: boolean }
   | { type: "setSyncCursor"; enabled: boolean }
   | { type: "refreshSource" }
   | { type: "decodeAllForSearch"; renderKey: number }
-  | { type: "revealSource" | "previousJsonl" | "nextJsonl" }
+  | { type: "setJsonlFilter"; query: string }
+  | { type: "listJsonlMatches"; query: string }
+  | { type: "openJsonlTable"; query: string }
+  | { type: "exportTable"; mode: "copy" | "open"; rowIndices: number[] }
+  | { type: "revealSource" }
+  | { type: "previousJsonl" | "nextJsonl"; query?: string }
   | { type: "goToJsonlLine"; lineNumber: number };

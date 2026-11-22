@@ -12,10 +12,25 @@ import { startFixtureServer } from "./fixturePage";
 const SAMPLE = JSON.stringify({
   requestId: "req_demo_4096",
   createdAt: 1767225600,
+  isoTime: "2026-01-01T00:00:00.000Z",
   theme: { primary: "#3b82f6", accent: "rgb(234, 88, 12)" },
   docs: "https://example.com/docs",
+  items: [
+    { id: 10, name: "beta" },
+    { id: 2, name: "alpha" },
+  ],
   payload: JSON.stringify({ order: { id: 42, meta: JSON.stringify({ trace: "abc" }) } }),
 });
+
+function expectedLocalTimestampPrefix(ms: number): string {
+  const date = new Date(ms);
+  const pad2 = (n: number) => String(n).padStart(2, "0");
+  const offset = -date.getTimezoneOffset();
+  const tz = offset === 0
+    ? "UTC"
+    : `UTC${offset > 0 ? "+" : "-"}${Math.floor(Math.abs(offset) / 60)}${Math.abs(offset) % 60 === 0 ? "" : ":" + pad2(Math.abs(offset) % 60)}`;
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())} ${tz}`;
+}
 
 let server: Server;
 let origin: string;
@@ -95,12 +110,43 @@ test("keyboard navigation, the actions menu, and focus restoration work in a rea
 });
 
 test("value hints render with real styles", async () => {
-  const { page } = await open();
-  assert.equal(await row(page, "createdAt").locator(".value-hint").textContent(), "2026-01-01T00:00:00Z");
+  const { page, errors } = await open();
+  const expectedPrefix = expectedLocalTimestampPrefix(1767225600000);
+  const createdHint = await row(page, "createdAt").locator(".value-hint").textContent();
+  assert.ok(createdHint?.startsWith(expectedPrefix), `expected ${createdHint} to start with ${expectedPrefix}`);
+  const isoHint = await row(page, "isoTime").locator(".value-hint").textContent();
+  assert.ok(isoHint?.startsWith(expectedPrefix), `expected ${isoHint} to start with ${expectedPrefix}`);
   const swatches = await page.locator(".color-swatch").evaluateAll((elements) =>
     elements.map((element) => getComputedStyle(element).backgroundColor));
   assert.deepEqual(swatches, ["rgb(59, 130, 246)", "rgb(234, 88, 12)"]);
   assert.equal(await row(page, "docs").locator(".value.link").count(), 1);
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("breadcrumb bar, depth selector, sort keys, inline preview, and table view work under CSP", async () => {
+  const { page, errors } = await open();
+  await row(page, "primary").click();
+  const segments = await page.locator(".breadcrumb-segment").allTextContents();
+  assert.deepEqual(segments, ["$", "theme", "primary"]);
+
+  await page.selectOption("#expand-depth", "1");
+  await row(page, "theme").locator(".inline-preview").waitFor();
+
+  await page.click("#sort-keys");
+  const topKeys = await page.locator('[role="treeitem"][aria-level="2"] .key').allTextContents();
+  assert.deepEqual(topKeys, ["createdAt", "docs", "isoTime", "items", "payload", "requestId", "theme"]);
+
+  await row(page, "items").click({ button: "right" });
+  await page.locator(".menu-item", { hasText: "View as table" }).click();
+  await page.locator("#table-view:not(.hidden)").waitFor();
+  await page.locator("#data-table thead th", { hasText: "id" }).click();
+  const firstId = await page.locator("#data-table tbody tr").first().locator("td").nth(1).textContent();
+  assert.equal(firstId, "2");
+
+  await page.locator("#data-table tbody tr").first().click();
+  await page.locator("#table-view").waitFor({ state: "hidden" });
+  assert.deepEqual(errors, []);
   await page.close();
 });
 

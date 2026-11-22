@@ -1,7 +1,7 @@
 import type { JsonTreeNode } from "./jsonTree";
 
 /** Hard safety boundary for materializing every Tree View node at once. */
-export const MAX_EXPAND_ALL_NODES = 10_000;
+export const MAX_EXPAND_ALL_NODES = 100_000;
 
 /**
  * Uses an iterative, early-exit count so deeply nested or large JSON values do

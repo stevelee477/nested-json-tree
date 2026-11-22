@@ -27,21 +27,49 @@ export function createWebviewHarness(
     }
   }
 
+  let activeElement: FakeElement | undefined;
+  const setActiveElement = (element: FakeElement | undefined): void => {
+    activeElement = element;
+  };
+  const dispatchFrom = (start: FakeElement, type: string, event: unknown): void => {
+    const eventObj = event && typeof event === "object" ? event as Record<string, unknown> : {};
+    if (!("target" in eventObj)) eventObj.target = start;
+    let stopped = false;
+    const origStop = typeof eventObj.stopPropagation === "function"
+      ? eventObj.stopPropagation as () => void
+      : undefined;
+    eventObj.stopPropagation = () => {
+      stopped = true;
+      origStop?.();
+    };
+    let current: FakeElement | undefined = start;
+    while (current && !stopped) {
+      for (const listener of current.listeners.get(type) ?? []) listener(eventObj);
+      current = current.parentElement;
+    }
+  };
+
   class FakeElement {
     readonly classList = new FakeClassList();
     readonly listeners = new Map<string, Array<(event: unknown) => void>>();
     readonly attributes = new Map<string, string>();
     readonly children: FakeElement[] = [];
+    readonly tagName: string;
+    parentElement: FakeElement | undefined;
     className = "";
     textContent = "";
     title = "";
     value = "";
+    checked = false;
     disabled = false;
     tabIndex = 0;
     scrollTop = 0;
+    clientHeight = 600;
     readonly style: Record<string, string> = {};
 
-    constructor(readonly fragment = false) {}
+    constructor(readonly fragment = false, tagName = "DIV") {
+      this.tagName = tagName.toUpperCase();
+    }
 
     addEventListener(type: string, listener: (event: unknown) => void): void {
       const listeners = this.listeners.get(type) ?? [];
@@ -50,44 +78,87 @@ export function createWebviewHarness(
     }
 
     dispatch(type: string, event: unknown = {}): void {
-      for (const listener of this.listeners.get(type) ?? []) listener(event);
+      dispatchFrom(this, type, event);
     }
 
     appendChild(child: FakeElement): FakeElement {
-      if (child.fragment) this.children.push(...child.children);
-      else this.children.push(child);
+      if (child.fragment) {
+        for (const item of child.children) {
+          item.parentElement = this;
+          this.children.push(item);
+        }
+      } else {
+        child.parentElement = this;
+        this.children.push(child);
+      }
       return child;
     }
 
     replaceChildren(...children: FakeElement[]): void {
-      this.children.splice(0, this.children.length, ...children);
+      for (const existing of this.children) existing.parentElement = undefined;
+      this.children.length = 0;
+      for (const child of children) {
+        this.appendChild(child);
+      }
     }
 
     setAttribute(name: string, value: string): void {
       this.attributes.set(name, value);
     }
 
+    getAttribute(name: string): string | null {
+      return this.attributes.get(name) ?? null;
+    }
+
     removeAttribute(name: string): void {
       this.attributes.delete(name);
     }
 
-    querySelectorAll(selector: string): FakeElement[] {
-      const classes = selector.split('.').filter(Boolean);
-      const result: FakeElement[] = [];
-      const pending = [...this.children];
-      while (pending.length > 0) {
-        const child = pending.pop() as FakeElement;
-        if (classes.every((name) => child.classList.contains(name) || child.className.split(' ').includes(name))) result.push(child);
-        pending.push(...child.children);
+    contains(other: FakeElement | null | undefined): boolean {
+      let current = other ?? undefined;
+      while (current) {
+        if (current === this) return true;
+        current = current.parentElement;
       }
-      return result.reverse();
+      return false;
     }
 
-    getBoundingClientRect(): { width: number; height: number } {
-      return { width: 0, height: 0 };
+    matchesSelector(selector: string): boolean {
+      if (selector.startsWith(".")) {
+        const classes = selector.split(".").filter(Boolean);
+        return classes.every((name) => this.classList.contains(name) || this.className.split(" ").includes(name));
+      }
+      return this.tagName === selector.toUpperCase();
     }
 
-    focus(): void {}
+    querySelector(selector: string): FakeElement | null {
+      return this.querySelectorAll(selector)[0] ?? null;
+    }
+
+    querySelectorAll(selector: string): FakeElement[] {
+      const result: FakeElement[] = [];
+      const walk = (node: FakeElement): void => {
+        for (const child of node.children) {
+          if (child.matchesSelector(selector)) result.push(child);
+          walk(child);
+        }
+      };
+      walk(this);
+      return result;
+    }
+
+    getBoundingClientRect(): { width: number; height: number; left: number; bottom: number } {
+      return { width: 0, height: 0, left: 0, bottom: 0 };
+    }
+
+    focus(): void {
+      setActiveElement(this);
+    }
+
+    blur(): void {
+      if (activeElement === this) setActiveElement(undefined);
+    }
+
     select(): void {}
     scrollIntoView(): void {}
   }
@@ -103,6 +174,8 @@ export function createWebviewHarness(
     "clear-search",
     "expand-all",
     "collapse-all",
+    "expand-depth",
+    "sort-keys",
     "empty-search",
     "title",
     "path",
@@ -114,6 +187,10 @@ export function createWebviewHarness(
     "go-jsonl",
     "reveal-source",
     "follow-cursor",
+    "keep-view",
+    "jsonl-filter",
+    "jsonl-filter-list",
+    "jsonl-table",
     "jsonl-status",
     "recovery-warning",
     "tree-operation-status",
@@ -122,8 +199,26 @@ export function createWebviewHarness(
     "refresh-source",
     "source-status",
     "search-decoded",
+    "breadcrumb-bar",
+    "breadcrumb-segments",
+    "breadcrumb-copy-jsonpath",
+    "breadcrumb-copy-jq",
+    "table-view",
+    "table-title",
+    "table-filter",
+    "table-count",
+    "table-copy-csv",
+    "table-export-csv",
+    "table-close",
+    "data-table",
   ];
-  const elements = new Map(elementIds.map((id) => [id, new FakeElement()]));
+  const elements = new Map(elementIds.map((id) => [id, new FakeElement(false, id === "data-table" ? "TABLE" : "DIV")]));
+  const dataTable = elements.get("data-table")!;
+  dataTable.appendChild(new FakeElement(false, "THEAD"));
+  dataTable.appendChild(new FakeElement(false, "TBODY"));
+  elements.get("table-view")!.classList.add("hidden");
+  elements.get("menu")!.classList.add("hidden");
+
   if (l10nBundle !== undefined) {
     const bundle = new FakeElement();
     bundle.textContent = JSON.stringify(l10nBundle);
@@ -131,16 +226,25 @@ export function createWebviewHarness(
   }
   const posted: Array<Record<string, unknown>> = [];
   const windowListeners = new Map<string, Array<(event: { data: unknown }) => void>>();
+  const docListeners = new Map<string, Array<(event: unknown) => void>>();
   const timers: Array<() => void> = [];
   const document = {
+    get activeElement() {
+      return activeElement;
+    },
     getElementById: (id: string) => elements.get(id),
-    createElement: () => new FakeElement(),
+    createElement: (tag = "div") => new FakeElement(false, tag),
     createDocumentFragment: () => new FakeElement(true),
-    addEventListener: () => {},
+    addEventListener: (type: string, listener: (event: unknown) => void) => {
+      const listeners = docListeners.get(type) ?? [];
+      listeners.push(listener);
+      docListeners.set(type, listeners);
+    },
   };
   const window = {
     innerWidth: 1_000,
     innerHeight: 800,
+    getSelection: () => ({ toString: () => "" }),
     addEventListener: (type: string, listener: (event: { data: unknown }) => void) => {
       const listeners = windowListeners.get(type) ?? [];
       listeners.push(listener);
@@ -181,5 +285,5 @@ export function createWebviewHarness(
   const send = (data: unknown): void => {
     for (const listener of windowListeners.get("message") ?? []) listener({ data });
   };
-  return { elements, windowListeners, timers, drainTimers, posted, send };
+  return { elements, windowListeners, docListeners, timers, drainTimers, posted, send };
 }

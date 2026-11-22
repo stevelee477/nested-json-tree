@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
 import test from "node:test";
+import { WORKER_PARSE_THRESHOLD_CHARS, disposeParseWorker, parseJsonCandidatesAsync } from "../asyncParser";
 import { jsonTreeToValue, stringifyJsonTree } from "../jsonTree";
 import {
   InputTooLargeError,
@@ -432,4 +433,35 @@ test("damaged inputs always retain source ranges and serialize to valid JSON", (
       }
     }
   }
+});
+
+test("single-pass parser rejects unclosed comments, leading commas, and trailing values strictly", () => {
+  assert.deepEqual(parseJsonCandidates('{"a":1} /* unclosed', { allowPartial: false }), [{
+    ...parseJsonCandidates('{"a":1}')[0],
+    start: 0,
+    end: 7,
+  }]);
+  assert.deepEqual(parseJsonCandidates('{,}', { allowPartial: false }), []);
+  assert.deepEqual(parseJsonCandidates('[,]', { allowPartial: false }), []);
+  const multi = parseJsonCandidates('{"a":1} {"b":2}');
+  assert.deepEqual(multi.map((c) => jsonTreeToValue(c.tree)), [{ a: 1 }, { b: 2 }]);
+});
+
+test("parseJsonCandidatesAsync offloads large inputs to worker thread and preserves limit errors", { timeout: 10_000 }, async () => {
+  const small = await parseJsonCandidatesAsync('{"ok":true}');
+  assert.deepEqual(jsonTreeToValue(small[0].tree), { ok: true });
+
+  const itemCount = Math.ceil(WORKER_PARSE_THRESHOLD_CHARS / 2) + 100;
+  const largeValid = `[${"1,".repeat(itemCount - 1)}1]`;
+  assert.ok(largeValid.length >= WORKER_PARSE_THRESHOLD_CHARS);
+  const largeResult = await parseJsonCandidatesAsync(largeValid);
+  assert.equal(largeResult[0].tree.children?.length, itemCount);
+
+  const deepLarge = " ".repeat(WORKER_PARSE_THRESHOLD_CHARS) +
+    "[".repeat(MAX_JSON_NESTING + 1) + "0" + "]".repeat(MAX_JSON_NESTING + 1);
+  await assert.rejects(
+    () => parseJsonCandidatesAsync(deepLarge),
+    (err: unknown) => err instanceof JsonNestingTooDeepError,
+  );
+  await disposeParseWorker();
 });

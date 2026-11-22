@@ -19,6 +19,18 @@ const builds = [
     outfile: "out/extension.js",
   },
   {
+    entryPoints: ["src/parseWorker.ts"],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    target: "node18",
+    mainFields: ["module", "main"],
+    sourcemap: true,
+    minify,
+    keepNames: minify,
+    outfile: "out/parseWorker.js",
+  },
+  {
     entryPoints: { main: "src/webview/main.ts", tree: "src/webview/tree.css" },
     bundle: true,
     platform: "browser",

@@ -11,6 +11,7 @@ assets/screenshots/**
 node_modules/**
 out/**
 !out/extension.js
+!out/parseWorker.js
 !out/webview/main.js
 !out/webview/tree.css
 *.vsix
