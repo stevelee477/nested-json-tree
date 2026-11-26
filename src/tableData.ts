@@ -7,17 +7,26 @@ export interface TableRow {
   cells: string[];
 }
 
+export interface TableBuildOptions {
+  maxRows?: number;
+  maxColumns?: number;
+  flatten?: boolean;
+  maxFlattenDepth?: number;
+}
+
 export interface TableModel {
   title: string;
   columns: string[];
   rows: TableRow[];
   truncated: boolean;
   truncatedColumns: boolean;
+  flattened?: boolean;
   sourceKind: "array" | "jsonl";
 }
 
 const DEFAULT_MAX_ROWS = 1_000;
 const DEFAULT_MAX_COLUMNS = 60;
+const DEFAULT_MAX_FLATTEN_DEPTH = 3;
 const DEFAULT_CELL_PREVIEW_CHARS = 120;
 
 /** True when an array holds at least one object item suitable for tabular display. */
@@ -33,10 +42,35 @@ export function isTabularArrayNode(node: JsonTreeNode): boolean {
 export function buildTableFromArrayNode(
   node: JsonTreeNode,
   title: string,
-  maxRows = DEFAULT_MAX_ROWS,
-  maxColumns = DEFAULT_MAX_COLUMNS,
+  options?: TableBuildOptions,
+): TableModel | undefined;
+export function buildTableFromArrayNode(
+  node: JsonTreeNode,
+  title: string,
+  maxRows?: number,
+  maxColumns?: number,
+  options?: TableBuildOptions,
+): TableModel | undefined;
+export function buildTableFromArrayNode(
+  node: JsonTreeNode,
+  title: string,
+  maxRowsOrOptions?: number | TableBuildOptions,
+  maxColumnsArg?: number,
+  extraOptions?: TableBuildOptions,
 ): TableModel | undefined {
   if (!isTabularArrayNode(node)) return undefined;
+  const opts = typeof maxRowsOrOptions === "object" && maxRowsOrOptions !== null
+    ? maxRowsOrOptions
+    : extraOptions;
+  const maxRows = typeof maxRowsOrOptions === "number"
+    ? maxRowsOrOptions
+    : opts?.maxRows ?? DEFAULT_MAX_ROWS;
+  const maxColumns = typeof maxColumnsArg === "number"
+    ? maxColumnsArg
+    : opts?.maxColumns ?? DEFAULT_MAX_COLUMNS;
+  const flatten = opts?.flatten === true;
+  const maxFlattenDepth = opts?.maxFlattenDepth ?? DEFAULT_MAX_FLATTEN_DEPTH;
+
   const children = node.children!;
   const items = children.slice(0, maxRows).map((child, index) => ({
     rowLabel: `[${index}]`,
@@ -49,21 +83,75 @@ export function buildTableFromArrayNode(
     "array",
     children.length > maxRows,
     maxColumns,
+    flatten,
+    maxFlattenDepth,
   );
 }
 
 export function buildTableFromJsonlRecords(
   records: ReadonlyArray<{ lineNumber: number; tree: JsonTreeNode }>,
   title: string,
-  truncated = false,
-  maxColumns = DEFAULT_MAX_COLUMNS,
+  options?: TableBuildOptions,
+): TableModel;
+export function buildTableFromJsonlRecords(
+  records: ReadonlyArray<{ lineNumber: number; tree: JsonTreeNode }>,
+  title: string,
+  truncated?: boolean,
+  options?: TableBuildOptions,
+): TableModel;
+export function buildTableFromJsonlRecords(
+  records: ReadonlyArray<{ lineNumber: number; tree: JsonTreeNode }>,
+  title: string,
+  truncated?: boolean,
+  maxColumns?: number,
+  options?: TableBuildOptions,
+): TableModel;
+export function buildTableFromJsonlRecords(
+  records: ReadonlyArray<{ lineNumber: number; tree: JsonTreeNode }>,
+  title: string,
+  truncatedOrOptions: boolean | TableBuildOptions = false,
+  maxColumnsOrOptions?: number | TableBuildOptions,
+  extraOptions?: TableBuildOptions,
 ): TableModel {
-  const items = records.map((record) => ({
+  let opts: TableBuildOptions | undefined;
+  let truncated = false;
+  let maxColumns: number | undefined;
+
+  if (typeof truncatedOrOptions === "object" && truncatedOrOptions !== null) {
+    opts = truncatedOrOptions;
+  } else {
+    truncated = truncatedOrOptions;
+    if (typeof maxColumnsOrOptions === "object" && maxColumnsOrOptions !== null) {
+      opts = maxColumnsOrOptions;
+    } else {
+      maxColumns = maxColumnsOrOptions;
+      opts = extraOptions;
+    }
+  }
+
+  const effectiveMaxRows = opts?.maxRows;
+  const slicedRecords = effectiveMaxRows !== undefined && records.length > effectiveMaxRows
+    ? records.slice(0, effectiveMaxRows)
+    : records;
+  const effectiveTruncated = truncated || slicedRecords.length < records.length;
+  const effectiveMaxColumns = maxColumns ?? opts?.maxColumns ?? DEFAULT_MAX_COLUMNS;
+  const flatten = opts?.flatten === true;
+  const maxFlattenDepth = opts?.maxFlattenDepth ?? DEFAULT_MAX_FLATTEN_DEPTH;
+
+  const items = slicedRecords.map((record) => ({
     rowLabel: String(record.lineNumber + 1),
     targetLineNumber: record.lineNumber,
     tree: record.tree,
   }));
-  return buildTableModel(items, title, "jsonl", truncated, maxColumns);
+  return buildTableModel(
+    items,
+    title,
+    "jsonl",
+    effectiveTruncated,
+    effectiveMaxColumns,
+    flatten,
+    maxFlattenDepth,
+  );
 }
 
 function buildTableModel(
@@ -72,11 +160,14 @@ function buildTableModel(
   sourceKind: TableModel["sourceKind"],
   truncated: boolean,
   maxColumns: number,
+  flatten: boolean,
+  maxFlattenDepth: number,
 ): TableModel {
   const columns: string[] = [];
   const columnSet = new Set<string>();
   let truncatedColumns = false;
   let hasNonObjectRow = false;
+  const effectiveMaxDepth = Math.max(0, Math.trunc(maxFlattenDepth));
 
   const ensureColumn = (name: string): void => {
     if (columnSet.has(name)) return;
@@ -86,6 +177,13 @@ function buildTableModel(
     }
     columnSet.add(name);
     columns.push(name);
+  };
+
+  const recordCell = (values: Map<string, string>, colName: string, cellNode: JsonTreeNode): void => {
+    ensureColumn(colName);
+    if (columnSet.has(colName) && !values.has(colName)) {
+      values.set(colName, formatTableCell(cellNode));
+    }
   };
 
   const rowMaps: Array<{
@@ -98,19 +196,42 @@ function buildTableModel(
   for (const item of items) {
     const values = new Map<string, string>();
     if (item.tree.type === "object") {
-      for (const child of item.tree.children ?? []) {
-        const key = String(child.key);
-        ensureColumn(key);
-        if (columnSet.has(key) && !values.has(key)) {
-          values.set(key, formatTableCell(child.value));
+      if (!flatten || effectiveMaxDepth === 0) {
+        for (const child of item.tree.children ?? []) {
+          recordCell(values, String(child.key), child.value);
+        }
+      } else {
+        const topChildren = item.tree.children ?? [];
+        const stack: Array<{ prefix: string; node: JsonTreeNode; depth: number }> = [];
+        for (let index = topChildren.length - 1; index >= 0; index -= 1) {
+          const child = topChildren[index];
+          stack.push({ prefix: String(child.key), node: child.value, depth: 0 });
+        }
+        while (stack.length > 0) {
+          const current = stack.pop()!;
+          const nestedChildren = current.node.children;
+          if (
+            current.node.type === "object" &&
+            current.depth < effectiveMaxDepth &&
+            nestedChildren !== undefined &&
+            nestedChildren.length > 0
+          ) {
+            for (let index = nestedChildren.length - 1; index >= 0; index -= 1) {
+              const nested = nestedChildren[index];
+              stack.push({
+                prefix: `${current.prefix}.${String(nested.key)}`,
+                node: nested.value,
+                depth: current.depth + 1,
+              });
+            }
+          } else {
+            recordCell(values, current.prefix, current.node);
+          }
         }
       }
     } else {
       hasNonObjectRow = true;
-      ensureColumn("$value");
-      if (columnSet.has("$value")) {
-        values.set("$value", formatTableCell(item.tree));
-      }
+      recordCell(values, "$value", item.tree);
     }
     rowMaps.push({
       rowLabel: item.rowLabel,
@@ -137,6 +258,7 @@ function buildTableModel(
     rows,
     truncated,
     truncatedColumns,
+    flattened: flatten,
     sourceKind,
   };
 }
@@ -214,6 +336,25 @@ export function formatTableAsCsv(
   const lines: string[] = [columns.map(escapeCell).join(delimiter)];
   for (const row of rows) {
     lines.push(row.map(escapeCell).join(delimiter));
+  }
+  return lines.join("\n");
+}
+
+/** Formats columns and rows as a GitHub-Flavored Markdown table. */
+export function formatTableAsMarkdown(
+  columns: readonly string[],
+  rows: ReadonlyArray<readonly string[]>,
+): string {
+  if (columns.length === 0) return "";
+  const escapeMarkdownCell = (value: string): string =>
+    value.replace(/\r\n|\r|\n/g, "<br>").replace(/\|/g, "\\|");
+
+  const headerLine = `| ${columns.map(escapeMarkdownCell).join(" | ")} |`;
+  const separatorLine = `| ${columns.map(() => "---").join(" | ")} |`;
+  const lines: string[] = [headerLine, separatorLine];
+  for (const row of rows) {
+    const cells = columns.map((_, index) => escapeMarkdownCell(row[index] ?? ""));
+    lines.push(`| ${cells.join(" | ")} |`);
   }
   return lines.join("\n");
 }
