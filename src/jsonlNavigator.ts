@@ -265,19 +265,79 @@ export function parseJsonlFilter(query: string): JsonlFilterSpec | undefined {
   return terms.length > 0 ? { raw: trimmed, terms } : undefined;
 }
 
-/** Cheap pre-check before JSON parsing; keeps lines containing escapes so decoded matches aren't missed. */
-export function lineMightMatchFilter(lineText: string, filter: JsonlFilterSpec): boolean {
-  if (lineText.trim().length === 0) return false;
-  if (lineText.includes("\\")) return true;
-  const lower = lineText.toLowerCase();
+const JSON_ESCAPE_SPLIT_RE = /["'\\\r\n\t\b\f/]+/;
+
+interface CompiledNeedle {
+  full: string;
+  chunks: readonly string[];
+}
+
+const compiledNeedlesCache = new WeakMap<JsonlFilterSpec, readonly CompiledNeedle[]>();
+
+function compileFilterNeedles(filter: JsonlFilterSpec): readonly CompiledNeedle[] {
+  const cached = compiledNeedlesCache.get(filter);
+  if (cached !== undefined) return cached;
+
+  const needles: CompiledNeedle[] = [];
+  const addNeedle = (valueLower: string): void => {
+    if (valueLower.length === 0) return;
+    const chunks = valueLower.split(JSON_ESCAPE_SPLIT_RE).filter((chunk) => chunk.length > 0);
+    needles.push({ full: valueLower, chunks });
+  };
+
   for (const term of filter.terms) {
     if (term.kind === "text") {
-      if (!lower.includes(term.valueLower)) return false;
+      addNeedle(term.valueLower);
     } else {
-      const keyNeedle = term.pathLower[term.pathLower.length - 1];
-      if (!lower.includes(keyNeedle)) return false;
-      if (term.valueLower.length > 0 && !lower.includes(term.valueLower)) return false;
+      for (const segment of term.pathLower) {
+        addNeedle(segment);
+      }
+      if (term.valueLower.length > 0) {
+        addNeedle(term.valueLower);
+      }
     }
+  }
+
+  compiledNeedlesCache.set(filter, needles);
+  return needles;
+}
+
+function isBlankLine(text: string): boolean {
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charCodeAt(index) > 0x20) return false;
+  }
+  return true;
+}
+
+function lowerLineMatchesNeedle(lower: string, hasBackslash: boolean, needle: CompiledNeedle): boolean {
+  if (lower.includes(needle.full)) return true;
+  if (!hasBackslash) return false;
+  let searchFrom = 0;
+  for (const chunk of needle.chunks) {
+    const found = lower.indexOf(chunk, searchFrom);
+    if (found < 0) return false;
+    searchFrom = found + chunk.length;
+  }
+  return true;
+}
+
+/**
+ * Cheap pre-check before JSON parsing. Lines containing `\u` / `\U` unicode
+ * escapes keep bypassing the pre-check, while common escapes (`\"`, `\n`, `\/`,
+ * `\\`, `\t`) are handled with 100% recall by matching literal sub-chunks split
+ * on JSON escape characters.
+ */
+export function lineMightMatchFilter(lineText: string, filter: JsonlFilterSpec): boolean {
+  if (isBlankLine(lineText)) return false;
+  const backslashIndex = lineText.indexOf("\\");
+  if (backslashIndex >= 0 && (lineText.includes("\\u", backslashIndex) || lineText.includes("\\U", backslashIndex))) {
+    return true;
+  }
+  const hasBackslash = backslashIndex >= 0;
+  const lower = lineText.toLowerCase();
+  const needles = compileFilterNeedles(filter);
+  for (const needle of needles) {
+    if (!lowerLineMatchesNeedle(lower, hasBackslash, needle)) return false;
   }
   return true;
 }

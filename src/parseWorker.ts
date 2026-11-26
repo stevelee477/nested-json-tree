@@ -9,12 +9,18 @@ import {
   JsonValueNodeLimitError,
   assertInputSize,
   parseJsonCandidates,
+  parseNestedJsonCandidates,
 } from "./parser";
+
+export type ParseWorkerMode = "candidates" | "nested";
 
 export interface ParseWorkerRequest {
   id: number;
+  mode?: ParseWorkerMode;
   text: string;
   options: JsonParseOptions;
+  /** True when the host already validated `assertInputSize(text)` before IPC. */
+  sizeChecked?: boolean;
 }
 
 export type SerializedLimitError =
@@ -49,8 +55,12 @@ function serializeLimitError(error: unknown): SerializedLimitError | undefined {
 
 parentPort?.on("message", (request: ParseWorkerRequest) => {
   try {
-    assertInputSize(request.text);
-    const candidates = parseJsonCandidates(request.text, request.options);
+    if (!request.sizeChecked) {
+      assertInputSize(request.text);
+    }
+    const candidates = request.mode === "nested"
+      ? parseNestedJsonCandidates(request.text, request.options)
+      : parseJsonCandidates(request.text, request.options);
     parentPort?.postMessage({ id: request.id, ok: true, candidates } satisfies ParseWorkerResponse);
   } catch (error: unknown) {
     const limitError = serializeLimitError(error);

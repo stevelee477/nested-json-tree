@@ -1,8 +1,8 @@
 import type { Node as JsoncNode } from "jsonc-parser";
-import { detectDecodableKind, looksLikeEmbeddedJson } from "./decodable";
+import { detectCheapDecodableKind, detectDecodableKind, looksLikeEmbeddedJson } from "./decodable";
 import type { JsonRecovery, JsonValue } from "./parser";
 
-export { detectDecodableKind, looksLikeEmbeddedJson };
+export { detectCheapDecodableKind, detectDecodableKind, looksLikeEmbeddedJson };
 
 const decodableKindCache = new WeakMap<JsonTreeNode, JsonTreeDecodableKind | null>();
 
@@ -18,6 +18,19 @@ export function cachedDetectDecodableKind(node: JsonTreeNode): JsonTreeDecodable
   if (cached !== undefined) return cached ?? undefined;
   const detected = detectDecodableKind(node.value);
   decodableKindCache.set(node, detected ?? null);
+  return detected;
+}
+
+function fastDetectDecodableKind(node: JsonTreeNode): JsonTreeDecodableKind | undefined {
+  if (node.type !== "string" || node.decoded !== undefined || typeof node.value !== "string") {
+    return undefined;
+  }
+  const cached = decodableKindCache.get(node);
+  if (cached !== undefined) return cached ?? undefined;
+  const detected = detectCheapDecodableKind(node.value);
+  if (detected !== undefined) {
+    decodableKindCache.set(node, detected);
+  }
   return detected;
 }
 
@@ -86,7 +99,9 @@ export type JsonTreeDecodedKind =
   | "json"
   | "jwt"
   | "url"
+  | "url-json"
   | "base64-json"
+  | "base64-gzip-json"
   | "base64-protobuf"
   | "base64-text";
 
@@ -97,6 +112,8 @@ export const MAX_PRETTY_OUTPUT_CHARACTERS = 16 * 1024 * 1024;
 export const MAX_TRANSFER_OUTPUT_CHARACTERS = 50 * 1024 * 1024;
 /** Maximum characters copied into one Webview model field. */
 export const MAX_WEBVIEW_FIELD_CHARACTERS = 10_000;
+/** Maximum strings in one Webview model build that run full Base64/Protobuf wire sniffing. */
+export const MAX_WEBVIEW_FULL_SNIFF_STRINGS = 5_000;
 
 export class JsonTreeOutputTooLargeError extends Error {
   constructor(public readonly maxCharacters = MAX_TRANSFER_OUTPUT_CHARACTERS) {
@@ -586,6 +603,7 @@ export function createJsonTreeWebviewModel(
     ? Math.max(1, Math.trunc(maxFieldCharacters))
     : MAX_WEBVIEW_FIELD_CHARACTERS;
   let truncatedFieldCount = 0;
+  let fullSniffCount = 0;
 
   const bounded = (text: string): { text: string; truncated: boolean; length: number } => {
     if (text.length <= limit) return { text, truncated: false, length: text.length };
@@ -628,7 +646,15 @@ export function createJsonTreeWebviewModel(
         if (node.decoded.embedded) target.decoded.embedded = true;
         pending.push({ source: node.decoded.root, target: decodedRoot });
       } else {
-        const decodableKind = cachedDetectDecodableKind(node);
+        let decodableKind: JsonTreeDecodableKind | undefined;
+        if (decodableKindCache.has(node)) {
+          decodableKind = decodableKindCache.get(node) ?? undefined;
+        } else if (fullSniffCount < MAX_WEBVIEW_FULL_SNIFF_STRINGS) {
+          fullSniffCount += 1;
+          decodableKind = cachedDetectDecodableKind(node);
+        } else {
+          decodableKind = fastDetectDecodableKind(node);
+        }
         if (decodableKind !== undefined) {
           target.decodable = true;
           if (decodableKind !== "json") target.decodableKind = decodableKind;

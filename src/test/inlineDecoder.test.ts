@@ -1,8 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { deflateRawSync, deflateSync, gzipSync } from "node:zlib";
 import { decodeBase64Bytes, detectDecodableKind, isLikelyPlainWordOrHash } from "../decodable";
 import { decodeInlineString } from "../inlineDecoder";
-import { jsonTreeToValue } from "../jsonTree";
+import {
+  MAX_WEBVIEW_FULL_SNIFF_STRINGS,
+  cachedDetectDecodableKind,
+  createJsonTreeWebviewModel,
+  jsonTreeToValue,
+  type JsonTreeNode,
+} from "../jsonTree";
 
 const pickFirst = async <T>(items: T[]): Promise<T | undefined> => items[0];
 
@@ -183,4 +190,189 @@ test("decodeBase64Bytes validates trailing bits, padding, and alphabet strictly"
   assert.equal(decodeBase64Bytes("AA=A"), undefined);
   assert.equal(decodeBase64Bytes("A==="), undefined);
   assert.equal(isLikelyPlainWordOrHash("my-service-name"), true);
+});
+
+test("detects and decodes Base64 and Base64URL Gzip, Zlib, and Deflate payloads", async () => {
+  const jsonPayload = '{"service":"billing","traceId":9007199254740993,"ok":true}';
+  const gzipB64 = gzipSync(jsonPayload).toString("base64");
+  const gzipB64Url = gzipSync(jsonPayload).toString("base64url");
+  const zlibB64 = deflateSync(jsonPayload).toString("base64");
+  const rawDeflateB64 = deflateRawSync(jsonPayload).toString("base64");
+
+  for (const encoded of [gzipB64, gzipB64Url, zlibB64, rawDeflateB64]) {
+    assert.equal(detectDecodableKind(encoded), "base64");
+    const decoded = await decodeInlineString(encoded, 10_000, pickFirst);
+    assert.ok(decoded);
+    assert.equal(decoded.kind, "base64-gzip-json");
+    assert.equal(decoded.root.children?.[0].value.value, "billing");
+    assert.equal(decoded.root.children?.[1].value.raw, "9007199254740993");
+  }
+
+  // Compressed Protobuf wire format (gzip + zlib)
+  const pbBytes = new Uint8Array([
+    0x0a, 0x05, 0x61, 0x6c, 0x69, 0x63, 0x65,
+    0x10, 0x2a,
+  ]);
+  for (const compressed of [gzipSync(pbBytes).toString("base64"), deflateSync(pbBytes).toString("base64url")]) {
+    assert.equal(detectDecodableKind(compressed), "base64");
+    const decoded = await decodeInlineString(compressed, 10_000, pickFirst);
+    assert.ok(decoded);
+    assert.equal(decoded.kind, "base64-protobuf");
+    assert.deepEqual(jsonTreeToValue(decoded.root), { "1": "alice", "2": 42 });
+  }
+
+  // Compressed UTF-8 plain text (gzip + zlib + raw deflate)
+  const textSample =
+    "Compressed multi-line log message\nline two: all systems nominal. Repeated message: all systems nominal!";
+  for (const compressed of [
+    gzipSync(textSample).toString("base64"),
+    deflateSync(textSample).toString("base64"),
+    deflateRawSync(textSample).toString("base64"),
+  ]) {
+    assert.equal(detectDecodableKind(compressed), "base64");
+    const decoded = await decodeInlineString(compressed, 10_000, pickFirst);
+    assert.ok(decoded);
+    assert.equal(decoded.kind, "base64-text");
+    assert.equal(decoded.root.value, textSample);
+  }
+});
+
+test("blocks Gzip and Zlib zip bombs exceeding 4 MiB output limit and rejects corrupt gzip headers", async () => {
+  const oversized = new Uint8Array(4 * 1024 * 1024 + 1024).fill(0x61);
+  const gzipBomb = gzipSync(oversized).toString("base64");
+  const zlibBomb = deflateSync(oversized).toString("base64");
+
+  for (const bomb of [gzipBomb, zlibBomb]) {
+    assert.equal(detectDecodableKind(bomb), undefined);
+    assert.equal(await decodeInlineString(bomb, 10_000, pickFirst), null);
+  }
+
+  const corruptGzip = Buffer.from([0x1f, 0x8b, 0x08, 0, 1, 2, 3, 4, 5, 6, 7, 8]).toString("base64");
+  assert.equal(detectDecodableKind(corruptGzip), undefined);
+  assert.equal(await decodeInlineString(corruptGzip, 10_000, pickFirst), null);
+});
+
+test("supports relative URLs, custom URI schemes, standalone query strings, and percent-encoded JSON", async () => {
+  // 1. Relative URL with query string
+  const relUrl = "/api/v1/items?page=2&limit=50&filter=active#results";
+  assert.equal(detectDecodableKind(relUrl), "url");
+  const decodedRel = await decodeInlineString(relUrl, 10_000, pickFirst);
+  assert.ok(decodedRel);
+  assert.equal(decodedRel.kind, "url");
+  assert.deepEqual(jsonTreeToValue(decodedRel.root), {
+    pathname: "/api/v1/items",
+    params: { page: "2", limit: "50", filter: "active" },
+    hash: "#results",
+  });
+
+  // 2. Custom URI schemes (ws://, wss://, grpc://, app://)
+  const grpcUrl = "grpc://auth.internal:50051/v1.Auth/Check?timeout=5s&retry=2";
+  assert.equal(detectDecodableKind(grpcUrl), "url");
+  const decodedGrpc = await decodeInlineString(grpcUrl, 10_000, pickFirst);
+  assert.ok(decodedGrpc);
+  assert.deepEqual(jsonTreeToValue(decodedGrpc.root), {
+    origin: "grpc://auth.internal:50051",
+    pathname: "/v1.Auth/Check",
+    params: { timeout: "5s", retry: "2" },
+  });
+
+  for (const customUrl of [
+    "ws://localhost:8080/events?channel=orders",
+    "wss://realtime.example.com/socket?v=2&compress=1",
+    "app://deep/screen?tab=settings&id=7",
+  ]) {
+    assert.equal(detectDecodableKind(customUrl), "url");
+    assert.ok(await decodeInlineString(customUrl, 10_000, pickFirst));
+  }
+
+  // 3. Standalone query/form strings
+  const queryStr = "a=1&b=hello+world&c=3";
+  assert.equal(detectDecodableKind(queryStr), "url");
+  const decodedQuery = await decodeInlineString(queryStr, 10_000, pickFirst);
+  assert.ok(decodedQuery);
+  assert.equal(decodedQuery.kind, "url");
+  assert.deepEqual(jsonTreeToValue(decodedQuery.root), { a: "1", b: "hello world", c: "3" });
+
+  const singleEscapedQuery = "payload=%7B%22ok%22%3Atrue%7D";
+  assert.equal(detectDecodableKind(singleEscapedQuery), "url");
+  const decodedSingleQuery = await decodeInlineString(singleEscapedQuery, 10_000, pickFirst);
+  assert.ok(decodedSingleQuery);
+  assert.deepEqual(jsonTreeToValue(decodedSingleQuery.root), { payload: '{"ok":true}' });
+
+  // 4. URL percent-encoded JSON containers
+  const pctObj = encodeURIComponent('{"event":"signup","id":9007199254740993}');
+  assert.equal(detectDecodableKind(pctObj), "url");
+  const decodedPctObj = await decodeInlineString(pctObj, 10_000, pickFirst);
+  assert.ok(decodedPctObj);
+  assert.equal(decodedPctObj.kind, "url-json");
+  assert.equal(decodedPctObj.root.children?.[0].value.value, "signup");
+  assert.equal(decodedPctObj.root.children?.[1].value.raw, "9007199254740993");
+
+  const pctArr = "%5B%7B%22msg%22%3A%22hello+world%22%7D%2C2%5D";
+  assert.equal(detectDecodableKind(pctArr), "url");
+  const decodedPctArr = await decodeInlineString(pctArr, 10_000, pickFirst);
+  assert.ok(decodedPctArr);
+  assert.equal(decodedPctArr.kind, "url-json");
+  assert.deepEqual(jsonTreeToValue(decodedPctArr.root), [{ msg: "hello+world" }, 2]);
+
+  // False-positive checks on prose, regexes, paths without query, and single key=val
+  for (const nonUrl of [
+    "/api/v1/items",
+    "/^foo?bar$/",
+    "env=prod",
+    "status = 200 & ok = true",
+    "a=1 and b=2",
+    "R&D=team",
+  ]) {
+    assert.equal(detectDecodableKind(nonUrl), undefined, `unexpected URL match: ${nonUrl}`);
+  }
+});
+
+test("createJsonTreeWebviewModel skips expensive Base64 sniffing past 5,000 strings while keeping cheap checks and cache integrity", () => {
+  const b64Sample = Buffer.from('{"hidden":"in-base64"}', "utf8").toString("base64");
+  const children: NonNullable<JsonTreeNode["children"]> = [];
+  let nextId = 1;
+  for (let i = 0; i < MAX_WEBVIEW_FULL_SNIFF_STRINGS; i += 1) {
+    const val = `item_${i}`;
+    children.push({
+      key: i,
+      value: { id: nextId++, type: "string", raw: JSON.stringify(val), value: val },
+    });
+  }
+  const lateBase64Node: JsonTreeNode = {
+    id: nextId++,
+    type: "string",
+    raw: JSON.stringify(b64Sample),
+    value: b64Sample,
+  };
+  const lateJsonNode: JsonTreeNode = {
+    id: nextId++,
+    type: "string",
+    raw: '"{\\"fast\\":true}"',
+    value: '{"fast":true}',
+  };
+  const lateUrlNode: JsonTreeNode = {
+    id: nextId,
+    type: "string",
+    raw: '"/api/items?a=1&b=2"',
+    value: "/api/items?a=1&b=2",
+  };
+  children.push(
+    { key: children.length, value: lateBase64Node },
+    { key: children.length + 1, value: lateJsonNode },
+    { key: children.length + 2, value: lateUrlNode },
+  );
+
+  const root: JsonTreeNode = { id: 0, type: "array", children };
+  const model = createJsonTreeWebviewModel(root);
+  const outChildren = model.root.children!;
+
+  // Past the 5,000-string full-sniff budget, expensive Base64 sniffing is skipped...
+  assert.equal(outChildren[MAX_WEBVIEW_FULL_SNIFF_STRINGS].value.decodable, undefined);
+  // ...while cheap JSON and URL prefix checks still work...
+  assert.equal(outChildren[MAX_WEBVIEW_FULL_SNIFF_STRINGS + 1].value.decodable, true);
+  assert.equal(outChildren[MAX_WEBVIEW_FULL_SNIFF_STRINGS + 2].value.decodable, true);
+  assert.equal(outChildren[MAX_WEBVIEW_FULL_SNIFF_STRINGS + 2].value.decodableKind, "url");
+  // ...and direct cachedDetectDecodableKind on the skipped node was NOT poisoned with null!
+  assert.equal(cachedDetectDecodableKind(lateBase64Node), "base64");
 });

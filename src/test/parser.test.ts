@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
 import test from "node:test";
-import { WORKER_PARSE_THRESHOLD_CHARS, disposeParseWorker, parseJsonCandidatesAsync } from "../asyncParser";
+import {
+  DEFAULT_WORKER_IDLE_TIMEOUT_MS,
+  WORKER_PARSE_THRESHOLD_CHARS,
+  disposeParseWorker,
+  hasActiveParseWorker,
+  parseJsonCandidatesAsync,
+  parseNestedJsonCandidatesAsync,
+  setParseWorkerIdleTimeoutMs,
+} from "../asyncParser";
 import { jsonTreeToValue, stringifyJsonTree } from "../jsonTree";
 import {
   InputTooLargeError,
@@ -464,4 +472,38 @@ test("parseJsonCandidatesAsync offloads large inputs to worker thread and preser
     (err: unknown) => err instanceof JsonNestingTooDeepError,
   );
   await disposeParseWorker();
+});
+
+test("parseNestedJsonCandidatesAsync offloads large nested strings and worker idle timer reclaims idle worker", { timeout: 10_000 }, async () => {
+  await disposeParseWorker();
+  try {
+    const smallNested = await parseNestedJsonCandidatesAsync(JSON.stringify('{"nested":42}'));
+    assert.equal(smallNested.length, 1);
+    assert.equal(smallNested[0].unwrapDepth, 1);
+    assert.deepEqual(jsonTreeToValue(smallNested[0].tree), { nested: 42 });
+    assert.equal(hasActiveParseWorker(), false);
+
+    setParseWorkerIdleTimeoutMs(40);
+    const largeInner = `{"id":9007199254740993,"pad":"${"x".repeat(WORKER_PARSE_THRESHOLD_CHARS)}"}`;
+    const largeEncoded = JSON.stringify(largeInner);
+    assert.ok(largeEncoded.length >= WORKER_PARSE_THRESHOLD_CHARS);
+
+    const largeNested = await parseNestedJsonCandidatesAsync(largeEncoded);
+    assert.equal(largeNested.length, 1);
+    assert.equal(largeNested[0].unwrapDepth, 1);
+    assert.equal(largeNested[0].tree.children?.[0].value.raw, "9007199254740993");
+    assert.equal(hasActiveParseWorker(), true);
+
+    // Wait past the 40ms idle timeout and confirm the worker terminated automatically.
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.equal(hasActiveParseWorker(), false);
+
+    // Subsequent large call cleanly spawns a fresh worker.
+    const secondRun = await parseNestedJsonCandidatesAsync(largeEncoded);
+    assert.equal(secondRun.length, 1);
+    assert.equal(hasActiveParseWorker(), true);
+  } finally {
+    setParseWorkerIdleTimeoutMs(DEFAULT_WORKER_IDLE_TIMEOUT_MS);
+    await disposeParseWorker();
+  }
 });

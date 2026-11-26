@@ -12,10 +12,12 @@ import {
   JsonValueNodeLimitError,
   assertInputSize,
   parseJsonCandidates,
+  parseNestedJsonCandidates,
 } from "./parser";
-import type { ParseWorkerRequest, ParseWorkerResponse, SerializedLimitError } from "./parseWorker";
+import type { ParseWorkerMode, ParseWorkerRequest, ParseWorkerResponse, SerializedLimitError } from "./parseWorker";
 
 export const WORKER_PARSE_THRESHOLD_CHARS = 250_000;
+export const DEFAULT_WORKER_IDLE_TIMEOUT_MS = 60_000;
 
 interface PendingRequest {
   resolve: (candidates: JsonCandidate[]) => void;
@@ -23,8 +25,50 @@ interface PendingRequest {
 }
 
 let activeWorker: Worker | undefined;
+let idleTimer: ReturnType<typeof setTimeout> | undefined;
+let workerIdleTimeoutMs = DEFAULT_WORKER_IDLE_TIMEOUT_MS;
 let nextRequestId = 1;
 const pending = new Map<number, PendingRequest>();
+
+function clearIdleTimer(): void {
+  if (idleTimer !== undefined) {
+    clearTimeout(idleTimer);
+    idleTimer = undefined;
+  }
+}
+
+function scheduleIdleTermination(worker: Worker): void {
+  clearIdleTimer();
+  idleTimer = setTimeout(() => {
+    idleTimer = undefined;
+    if (activeWorker === worker && pending.size === 0) {
+      activeWorker = undefined;
+      void worker.terminate();
+    }
+  }, workerIdleTimeoutMs);
+  idleTimer.unref();
+}
+
+/**
+ * Configures how long an idle parse worker is kept alive before terminating so
+ * large V8 heaps are reclaimed after idle periods. Exposed for unit tests.
+ */
+export function setParseWorkerIdleTimeoutMs(timeoutMs: number): void {
+  workerIdleTimeoutMs = Number.isFinite(timeoutMs)
+    ? Math.max(0, Math.trunc(timeoutMs))
+    : DEFAULT_WORKER_IDLE_TIMEOUT_MS;
+  if (activeWorker !== undefined && pending.size === 0) {
+    scheduleIdleTermination(activeWorker);
+  }
+}
+
+export function getParseWorkerIdleTimeoutMs(): number {
+  return workerIdleTimeoutMs;
+}
+
+export function hasActiveParseWorker(): boolean {
+  return activeWorker !== undefined;
+}
 
 function deserializeLimitError(error: SerializedLimitError): JsonProcessingLimitError {
   switch (error.kind) {
@@ -57,7 +101,10 @@ function getWorker(): Worker | undefined {
     const entry = pending.get(response.id);
     if (entry === undefined) return;
     pending.delete(response.id);
-    if (pending.size === 0) worker.unref();
+    if (pending.size === 0) {
+      worker.unref();
+      scheduleIdleTermination(worker);
+    }
     if (response.ok) {
       entry.resolve(response.candidates);
     } else if (response.limitError !== undefined) {
@@ -67,17 +114,48 @@ function getWorker(): Worker | undefined {
     }
   });
   worker.on("error", (error: Error) => {
-    if (activeWorker === worker) activeWorker = undefined;
+    if (activeWorker === worker) {
+      activeWorker = undefined;
+      clearIdleTimer();
+    }
     rejectAllPending(error);
   });
   worker.on("exit", (code) => {
-    if (activeWorker === worker) activeWorker = undefined;
+    if (activeWorker === worker) {
+      activeWorker = undefined;
+      clearIdleTimer();
+    }
     if (pending.size > 0) {
       rejectAllPending(new Error(`Parse worker exited unexpectedly with code ${code}.`));
     }
   });
   activeWorker = worker;
   return worker;
+}
+
+function runOnWorkerOrSync(
+  mode: ParseWorkerMode,
+  text: string,
+  options: JsonParseOptions,
+  syncFallback: (input: string, opts: JsonParseOptions) => JsonCandidate[],
+): Promise<JsonCandidate[]> {
+  assertInputSize(text);
+  if (text.length < WORKER_PARSE_THRESHOLD_CHARS) {
+    return Promise.resolve(syncFallback(text, options));
+  }
+  const worker = getWorker();
+  if (worker === undefined) {
+    return Promise.resolve(syncFallback(text, options));
+  }
+  clearIdleTimer();
+  const id = nextRequestId;
+  nextRequestId += 1;
+  return new Promise<JsonCandidate[]>((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+    worker.ref();
+    const request: ParseWorkerRequest = { id, mode, text, options, sizeChecked: true };
+    worker.postMessage(request);
+  });
 }
 
 /**
@@ -88,25 +166,22 @@ export async function parseJsonCandidatesAsync(
   text: string,
   options: JsonParseOptions = {},
 ): Promise<JsonCandidate[]> {
-  assertInputSize(text);
-  if (text.length < WORKER_PARSE_THRESHOLD_CHARS) {
-    return parseJsonCandidates(text, options);
-  }
-  const worker = getWorker();
-  if (worker === undefined) {
-    return parseJsonCandidates(text, options);
-  }
-  const id = nextRequestId;
-  nextRequestId += 1;
-  return new Promise<JsonCandidate[]>((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-    worker.ref();
-    const request: ParseWorkerRequest = { id, text, options };
-    worker.postMessage(request);
-  });
+  return runOnWorkerOrSync("candidates", text, options, parseJsonCandidates);
+}
+
+/**
+ * Unwraps and parses large nested/escaped JSON strings on the reusable worker
+ * thread; smaller strings run synchronously on the calling thread.
+ */
+export async function parseNestedJsonCandidatesAsync(
+  text: string,
+  options: JsonParseOptions = {},
+): Promise<JsonCandidate[]> {
+  return runOnWorkerOrSync("nested", text, options, parseNestedJsonCandidates);
 }
 
 export async function disposeParseWorker(): Promise<void> {
+  clearIdleTimer();
   const worker = activeWorker;
   activeWorker = undefined;
   rejectAllPending(new Error("Parse worker disposed."));

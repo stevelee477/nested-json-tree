@@ -132,3 +132,34 @@ test("parseJsonlFilter, lineMightMatchFilter, and filtered navigation support te
   assert.equal(listed.status, "done");
   assert.deepEqual(listed.matches.map((m) => m.lineNumber), [2]);
 });
+
+test("lineMightMatchFilter skips non-matching lines with JSON escapes while keeping 100% recall on escaped quotes, slashes, and newlines", async () => {
+  const logLines: string[] = [];
+  for (let i = 0; i < 500; i += 1) {
+    logLines.push(`{"level":"INFO","payload":"{\\"req\\":${i},\\"msg\\":\\"line 1\\\\nline 2\\"}"}`);
+  }
+  // Line 500: escaped quotes (`\"`), escaped slashes (`\/`), and escaped newline (`\n`)
+  logLines.push(
+    '{"level":"ERROR","url":"https:\\/\\/api.example.com\\/v1","detail":"order \\"failed\\"\\nretry","payload":"{\\"code\\":503}"}',
+  );
+
+  const filter = parseJsonlFilter('level=error "https://api.example.com/v1" \'order "failed"\' 503');
+  assert.ok(filter);
+
+  assert.equal(lineMightMatchFilter(logLines[0], filter), false);
+  assert.equal(lineMightMatchFilter(logLines[500], filter), true);
+
+  let parsedCount = 0;
+  const result = await searchJsonlLines(lines(...logLines), {
+    filter,
+    parseLine: (text) => {
+      parsedCount += 1;
+      return parseJsonCandidates(text);
+    },
+  });
+
+  assert.equal(result.status, "done");
+  assert.deepEqual(result.matches.map((m) => m.lineNumber), [500]);
+  // All 500 non-matching lines with \" and \n escapes skipped AST parsing completely!
+  assert.equal(parsedCount, 1);
+});
