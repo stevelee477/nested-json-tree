@@ -40,7 +40,8 @@
     "onCommand:nestedJsonTree.openDocument",
     "onCommand:nestedJsonTree.openCurrentLine",
     "onCommand:nestedJsonTree.openSelection",
-    "onCommand:nestedJsonTree.openClipboard"
+    "onCommand:nestedJsonTree.openClipboard",
+    "onWebviewPanel:nestedJsonTree.viewer"
   ],
   "main": "./out/extension.js",
   "l10n": "./l10n",
@@ -101,12 +102,12 @@
       "editor/title": [
         {
           "command": "nestedJsonTree.openDocument",
-          "when": "(editorLangId == json || editorLangId == jsonc) && resourceExtname != .jsonl && resourceExtname != .ndjson",
+          "when": "(editorLangId == json || editorLangId == jsonc) && resourceExtname != .jsonl && resourceExtname != .ndjson && editorLangId != jsonl",
           "group": "navigation@20"
         },
         {
           "command": "nestedJsonTree.openCurrentLine",
-          "when": "resourceExtname == .jsonl || resourceExtname == .ndjson",
+          "when": "resourceExtname == .jsonl || resourceExtname == .ndjson || editorLangId == jsonl",
           "group": "navigation@20"
         }
       ],
@@ -118,13 +119,20 @@
         },
         {
           "command": "nestedJsonTree.openDocument",
-          "when": "editorTextFocus && (editorLangId == json || editorLangId == jsonc || resourceExtname == .json || resourceExtname == .jsonc || resourceExtname == .jsonl || resourceExtname == .ndjson)",
+          "when": "editorTextFocus && (editorLangId == json || editorLangId == jsonc || editorLangId == jsonl || resourceExtname == .json || resourceExtname == .jsonc || resourceExtname == .jsonl || resourceExtname == .ndjson)",
           "group": "navigation@90"
         },
         {
           "command": "nestedJsonTree.openCurrentLine",
-          "when": "editorTextFocus && (editorLangId == json || editorLangId == jsonc || resourceExtname == .json || resourceExtname == .jsonc || resourceExtname == .jsonl || resourceExtname == .ndjson)",
+          "when": "editorTextFocus && (editorLangId == json || editorLangId == jsonc || editorLangId == jsonl || resourceExtname == .json || resourceExtname == .jsonc || resourceExtname == .jsonl || resourceExtname == .ndjson)",
           "group": "navigation@91"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "nestedJsonTree.openDocument",
+          "when": "resourceExtname == .json || resourceExtname == .jsonc || resourceExtname == .jsonl || resourceExtname == .ndjson || resourceExtname == .log",
+          "group": "navigation@20"
         }
       ],
       "commandPalette": [
@@ -141,7 +149,21 @@
           "command": "nestedJsonTree.openClipboard"
         }
       ]
-    }
+    },
+    "keybindings": [
+      {
+        "command": "nestedJsonTree.openDocument",
+        "key": "alt+ctrl+j",
+        "mac": "alt+cmd+j",
+        "when": "editorTextFocus && resourceExtname != .jsonl && resourceExtname != .ndjson && editorLangId != jsonl"
+      },
+      {
+        "command": "nestedJsonTree.openCurrentLine",
+        "key": "alt+ctrl+j",
+        "mac": "alt+cmd+j",
+        "when": "editorTextFocus && (resourceExtname == .jsonl || resourceExtname == .ndjson || editorLangId == jsonl)"
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile:prod",

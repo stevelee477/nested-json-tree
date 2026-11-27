@@ -113,3 +113,28 @@ jobs:
           files: |
             dist/*.vsix
             dist/SHA256SUMS.txt
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Publish to VS Code Marketplace
+        shell: bash
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          NPM_CONFIG_YES: "true"
+        run: |
+          if [[ -n "${VSCE_PAT:-}" ]]; then
+            npx @vscode/vsce publish --packagePath dist/*.vsix
+          else
+            echo "Skipping VS Code Marketplace publish (VSCE_PAT is not set)."
+          fi
+      - name: Publish to Open VSX
+        shell: bash
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+          NPM_CONFIG_YES: "true"
+        run: |
+          if [[ -n "${OVSX_PAT:-}" ]]; then
+            npx ovsx publish dist/*.vsix
+          else
+            echo "Skipping Open VSX publish (OVSX_PAT is not set)."
+          fi
