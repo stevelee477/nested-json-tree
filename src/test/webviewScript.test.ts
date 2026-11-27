@@ -458,6 +458,124 @@ test("expansion, search, sortKeys, and scroll state survive the Webview being di
   assert.equal(nodeById(otherRecord, 3).getAttribute("aria-expanded"), "false", "state for another value is ignored");
 });
 
+test("revived panels at renderKey 0 restore persisted view state and structural expansion when panelSource matches", () => {
+  let saved: unknown;
+  const api = { getState: () => saved, setState: (state: unknown) => { saved = state; } };
+  const panelSource = { kind: "jsonl" as const, uri: "file:///workspace/events.jsonl", lineNumber: 2 };
+
+  const beforeReload = createWebviewHarness(embeddedWebviewScript(), api);
+  beforeReload.elements.get("tree")!.clientHeight = 44;
+  renderTree(
+    beforeReload,
+    {
+      id: 0,
+      type: "object",
+      children: [
+        {
+          key: "service",
+          rawKey: '"service"',
+          value: {
+            id: 1,
+            type: "object",
+            children: [{ key: "host", rawKey: '"host"', value: { id: 2, type: "string", raw: '"api-1"', value: "api-1" } }],
+          },
+        },
+        { key: "status", rawKey: '"status"', value: { id: 3, type: "number", raw: "200" } },
+      ],
+    },
+    {
+      renderKey: 7,
+      autoExpand: false,
+      panelSource,
+      jsonl: { lineNumber: 3, lineCount: 10, followCursor: false, keepView: true, filterQuery: "", status: "" },
+    },
+  );
+  beforeReload.drainTimers();
+
+  // Expand "service", toggle Aa + sortKeys + Inspector, pin "status", and scroll.
+  rowParts(nodeByKey(beforeReload, "service")).row.dispatch("click");
+  beforeReload.elements.get("search-case")!.dispatch("click");
+  beforeReload.elements.get("sort-keys")!.dispatch("click");
+  beforeReload.elements.get("toggle-inspector")!.dispatch("click");
+  rowParts(nodeByKey(beforeReload, "status")).row.dispatch("contextmenu", { clientX: 10, clientY: 10 });
+  const pinItem = beforeReload.elements.get("menu")!.children.find((el) => el.textContent === "Pin field");
+  assert.ok(pinItem);
+  pinItem.dispatch("click");
+  beforeReload.elements.get("tree")!.scrollTop = 24;
+  beforeReload.elements.get("tree")!.dispatch("scroll");
+  beforeReload.drainTimers();
+
+  assert.equal((saved as { renderKey: number }).renderKey, 7);
+
+  // Simulate VS Code window reload: freshJsonTreePanel starts at renderKey: 0, and even if an extra key
+  // shifted node IDs on disk, structural expandedPaths + pinnedPaths + toggles restore cleanly.
+  const revived = createWebviewHarness(embeddedWebviewScript(), api);
+  revived.elements.get("tree")!.clientHeight = 44;
+  renderTree(
+    revived,
+    {
+      id: 0,
+      type: "object",
+      children: [
+        { key: "addedBeforeReload", rawKey: '"addedBeforeReload"', value: { id: 1, type: "boolean", raw: "true", value: true } },
+        {
+          key: "service",
+          rawKey: '"service"',
+          value: {
+            id: 2,
+            type: "object",
+            children: [{ key: "host", rawKey: '"host"', value: { id: 3, type: "string", raw: '"api-1"', value: "api-1" } }],
+          },
+        },
+        { key: "status", rawKey: '"status"', value: { id: 4, type: "number", raw: "200" } },
+      ],
+    },
+    {
+      renderKey: 0,
+      autoExpand: false,
+      panelSource,
+      jsonl: { lineNumber: 3, lineCount: 10, followCursor: false, keepView: true, filterQuery: "", status: "" },
+    },
+  );
+  revived.drainTimers();
+
+  assert.equal(nodeByKey(revived, "service").getAttribute("aria-expanded"), "true", "structural expansion restored despite shifted IDs and renderKey reset to 0");
+  assert.equal(revived.elements.get("search-case")!.getAttribute("aria-pressed"), "true");
+  assert.equal(revived.elements.get("sort-keys")!.getAttribute("aria-pressed"), "true");
+  assert.equal(revived.elements.get("toggle-inspector")!.getAttribute("aria-pressed"), "true");
+  assert.equal(revived.elements.get("pinned-bar")!.classList.contains("hidden"), false);
+  assert.equal(revived.elements.get("pinned-chips")!.children[0].children[0].title, "status: 200");
+  assert.equal(revived.elements.get("tree")!.scrollTop, 24);
+
+  // Mismatched lineNumber in panelSource does not reuse another line's saved state.
+  const differentLine = createWebviewHarness(embeddedWebviewScript(), api);
+  renderTree(
+    differentLine,
+    {
+      id: 0,
+      type: "object",
+      children: [
+        {
+          key: "service",
+          rawKey: '"service"',
+          value: {
+            id: 1,
+            type: "object",
+            children: [{ key: "host", rawKey: '"host"', value: { id: 2, type: "string", raw: '"api-2"', value: "api-2" } }],
+          },
+        },
+      ],
+    },
+    {
+      renderKey: 0,
+      autoExpand: false,
+      panelSource: { kind: "jsonl", uri: "file:///workspace/events.jsonl", lineNumber: 5 },
+    },
+  );
+  differentLine.drainTimers();
+  assert.equal(nodeByKey(differentLine, "service").getAttribute("aria-expanded"), "false");
+});
+
 const objectWithPayload = () => ({
   id: 0, type: "object", children: [
     { key: "payload", rawKey: '"payload"', value: {

@@ -35,6 +35,7 @@ type WebviewPathStep = number | { key: string; occurrence: number } | "decoded";
 interface SavedViewState {
   renderKey: number;
   expanded: number[];
+  expandedPaths?: WebviewPathStep[][];
   query: string;
   scrollTop: number;
   searchDecoded?: boolean;
@@ -535,7 +536,8 @@ function render(message: RenderMessage): void {
     ? message.recovery.issues.map((issue) => t("{0} at character {1}", issue.code, issue.offset + 1)).join("; ")
     : "";
 
-  const saved = renderKey === -1 ? loadViewState(message.renderKey) : undefined;
+  const loaded = renderKey === -1 ? loadViewState(message) : undefined;
+  const saved = loaded?.saved;
   renderKey = message.renderKey;
   currentRoot = message.root;
   if (message.panelSource !== undefined) currentPanelSource = message.panelSource;
@@ -572,7 +574,15 @@ function render(message: RenderMessage): void {
 
   const restore = snapshot !== undefined
     ? { query: searchInput.value, expanded: resolveStructuralPaths(snapshot.expandedPaths), scrollTop: snapshot.scrollTop }
-    : saved;
+    : saved !== undefined
+      ? {
+          query: saved.query,
+          expanded: loaded?.revivedBySource && Array.isArray(saved.expandedPaths)
+            ? resolveStructuralPaths(saved.expandedPaths)
+            : saved.expanded,
+          scrollTop: saved.scrollTop,
+        }
+      : undefined;
 
   setFocusedNode(currentRoot.id, false);
   tree.scrollTop = 0;
@@ -3096,9 +3106,45 @@ function resolveStructuralPaths(paths: WebviewPathStep[][]): number[] {
 
 // View state persistence lets the panel drop retainContextWhenHidden.
 
-function loadViewState(key: number): SavedViewState | undefined {
+function extractSavedPanelSource(saved: SavedViewState): PanelSourceDescriptor | undefined {
+  if (
+    saved.panelSource !== undefined &&
+    typeof saved.panelSource.uri === "string" &&
+    (saved.panelSource.kind === "document" || saved.panelSource.kind === "jsonl")
+  ) {
+    return saved.panelSource;
+  }
+  if ((saved.kind === "document" || saved.kind === "jsonl") && typeof saved.uri === "string") {
+    return {
+      kind: saved.kind,
+      uri: saved.uri,
+      ...(saved.lineNumber !== undefined ? { lineNumber: saved.lineNumber } : {}),
+    };
+  }
+  return undefined;
+}
+
+function panelSourcesMatch(a: PanelSourceDescriptor, b: PanelSourceDescriptor): boolean {
+  if (a.kind !== b.kind || a.uri !== b.uri) return false;
+  if (a.kind === "jsonl") {
+    return (a.lineNumber ?? 0) === (b.lineNumber ?? 0);
+  }
+  return true;
+}
+
+function loadViewState(message: RenderMessage): { saved: SavedViewState; revivedBySource: boolean } | undefined {
   const saved = vscode.getState?.() as SavedViewState | undefined;
-  return saved && saved.renderKey === key && Array.isArray(saved.expanded) ? saved : undefined;
+  if (!saved || !Array.isArray(saved.expanded)) return undefined;
+  if (saved.renderKey === message.renderKey) {
+    return { saved, revivedBySource: false };
+  }
+  if (message.renderKey === 0 && message.panelSource !== undefined) {
+    const savedSource = extractSavedPanelSource(saved);
+    if (savedSource !== undefined && panelSourcesMatch(savedSource, message.panelSource)) {
+      return { saved, revivedBySource: true };
+    }
+  }
+  return undefined;
 }
 
 function schedulePersist(): void {
@@ -3106,9 +3152,11 @@ function schedulePersist(): void {
   persistScheduled = true;
   setTimeout(() => {
     persistScheduled = false;
+    const expandedPaths = expandedIds.size > 0 ? captureViewByStructure().expandedPaths : undefined;
     const state: SavedViewState = {
       renderKey,
       expanded: [...expandedIds],
+      ...(expandedPaths !== undefined ? { expandedPaths } : {}),
       query: searchInput.value,
       scrollTop: tree.scrollTop,
       searchDecoded,
