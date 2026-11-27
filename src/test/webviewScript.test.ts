@@ -81,7 +81,7 @@ test("Tree View markup includes accessible search and tree controls", () => {
 });
 
 test("search runs incrementally inside the Webview", () => {
-  assert.match(webviewSource, /createSearchState\(currentRoot as never, query, 5_000, options\)/);
+  assert.match(webviewSource, /createJsonTreeSearchState\(currentRoot, query, 5_000, options\)/);
   assert.match(webviewSource, /advanceJsonTreeSearch\(state, 2_000\)/);
   assert.match(webviewSource, /searchExactIds\.has\(/);
 });

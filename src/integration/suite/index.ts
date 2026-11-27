@@ -391,6 +391,28 @@ async function verifyContainerAndEncodedOpenActions(api: ExtensionTestApi): Prom
   assert.equal(panel.lastTable?.rows.length, 2);
   await panel.postFromWebview({ type: "exportTable", mode: "copy", rowIndices: [0, 1] });
   assert.equal(await vscode.env.clipboard.readText(), "id,name\n1,a\n2,b");
+  await panel.postFromWebview({ type: "exportTable", mode: "copy", format: "tsv", rowIndices: [0, 1] });
+  assert.equal(await vscode.env.clipboard.readText(), "id\tname\n1\ta\n2\tb");
+  await panel.postFromWebview({ type: "exportTable", mode: "copy", format: "markdown", rowIndices: [0, 1] });
+  assert.equal(await vscode.env.clipboard.readText(), "| id | name |\n| --- | --- |\n| 1 | a |\n| 2 | b |");
+
+  await panel.runNodeAction("inspectNode", sub.id);
+  assert.equal(panel.lastInspection?.path, "$.sub");
+  assert.equal(panel.lastInspection?.childCount, 1);
+  assert.ok(panel.lastInspection?.fullValue.includes('"nestedKey": 42'));
+
+  await panel.postFromWebview({ type: "generateTypes", nodeId: sub.id, target: "typescript", mode: "copy" });
+  assert.ok((await vscode.env.clipboard.readText()).includes("nestedKey: number;"));
+
+  await vscode.env.clipboard.writeText(JSON.stringify({ nestedKey: 99, addedKey: true }));
+  const diffBeforeCount = api.panels().length;
+  await panel.runNodeAction("diffSubtreeWithClipboard", sub.id);
+  const diffPanel = await waitFor(
+    () => (api.panels().length > diffBeforeCount ? api.panels().at(-1) : undefined),
+    "the subtree diff panel",
+  );
+  assert.equal(diffPanel.diff?.summary.changed, 1);
+  assert.equal(diffPanel.diff?.summary.added, 1);
 }
 
 async function verifyJsonlFilterAndKeepView(api: ExtensionTestApi): Promise<void> {

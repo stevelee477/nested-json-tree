@@ -38,10 +38,6 @@ export interface SerializedPanelSource {
   lineNumber?: number;
 }
 
-type RevivableJsonTreePanel = typeof JsonTreePanel & {
-  revive?: (panel: vscode.WebviewPanel, services: PanelServices, init: PanelInit) => JsonTreePanel;
-};
-
 export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   services = { extensionUri: context.extensionUri, pickCandidate };
   const register = <Args extends unknown[]>(
@@ -191,15 +187,7 @@ async function restoreWebviewPanel(panel: vscode.WebviewPanel, state: unknown): 
       return;
     }
 
-    const revivable = JsonTreePanel as RevivableJsonTreePanel;
-    if (typeof revivable.revive === "function") {
-      panel.title = init.title;
-      revivable.revive(panel, services, init);
-    } else {
-      const viewColumn = panel.viewColumn ?? vscode.ViewColumn.Active;
-      panel.dispose();
-      JsonTreePanel.create(services, { ...init, viewColumn });
-    }
+    JsonTreePanel.revive(panel, services, init);
   } finally {
     disposeSub.dispose();
   }

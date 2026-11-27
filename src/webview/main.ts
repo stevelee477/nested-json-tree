@@ -10,7 +10,13 @@ import type {
   SourceViewState,
   WebviewToHostMessage,
 } from "../protocol";
-import { advanceJsonTreeSearch, createJsonTreeSearchState, JsonTreeSearchState } from "../search";
+import {
+  advanceJsonTreeSearch,
+  createJsonTreeSearchState,
+  type JsonTreeSearchOptions,
+  type JsonTreeSearchScope,
+  type JsonTreeSearchState,
+} from "../search";
 import type { TableModel } from "../tableData";
 
 interface VsCodeApi {
@@ -21,22 +27,7 @@ interface VsCodeApi {
 
 declare function acquireVsCodeApi(): VsCodeApi;
 
-type SearchScope = "all" | "keys" | "values";
-
-interface SearchOptionsCompat {
-  caseSensitive?: boolean;
-  regex?: boolean;
-  scope?: SearchScope;
-}
-
-type SearchStateCompat = JsonTreeSearchState & { invalidRegex?: string };
-
-const createSearchState = createJsonTreeSearchState as unknown as (
-  root: unknown,
-  query: string,
-  maxMatches?: number,
-  options?: SearchOptionsCompat,
-) => SearchStateCompat;
+type SearchScope = JsonTreeSearchScope;
 
 type WebviewPathStep = number | { key: string; occurrence: number } | "decoded";
 
@@ -1349,22 +1340,12 @@ function runSearch(): void {
     resetSearchView();
     return;
   }
-  const options: SearchOptionsCompat = {
+  const options: JsonTreeSearchOptions = {
     caseSensitive: searchCaseSensitive,
     regex: searchRegex,
     scope: searchScope,
   };
-  const state = createSearchState(currentRoot as never, query, 5_000, options);
-  if (searchRegex && state.invalidRegex === undefined) {
-    try {
-      new RegExp(query, searchCaseSensitive ? "" : "i");
-    } catch (error) {
-      state.invalidRegex = error instanceof Error ? error.message : String(error);
-      state.done = true;
-      state.matches = [];
-      state.stack.length = 0;
-    }
-  }
+  const state = createJsonTreeSearchState(currentRoot, query, 5_000, options);
 
   if (state.invalidRegex !== undefined) {
     const wasActive = searchActive;
@@ -1417,7 +1398,7 @@ function runSearch(): void {
   processChunk();
 }
 
-function applySearchResults(result: SearchStateCompat, requestId: number): void {
+function applySearchResults(result: JsonTreeSearchState, requestId: number): void {
   if (requestId !== latestSearchRequest || !searchActive || !currentRoot) return;
   if (result.invalidRegex !== undefined) {
     searchActive = false;
@@ -1846,8 +1827,7 @@ function goToJsonlLine(): void {
 }
 
 function decodedRowLabel(decoded: NonNullable<JsonTreeWebviewNode["decoded"]>): string {
-  const kind = decoded.kind as string | undefined;
-  switch (kind) {
+  switch (decoded.kind) {
     case "jwt": return t("decoded JWT");
     case "url": return t("decoded URL");
     case "url-json": return t("decoded JSON (URL)");
@@ -2882,7 +2862,7 @@ function openTableView(table: TableModel): void {
   currentTable = table;
   tableSortColumn = -1;
   tableSortAsc = true;
-  const flattened = (table as TableModel & { flattened?: boolean }).flattened === true;
+  const flattened = table.flattened === true;
   tableFlatten = flattened;
   if (tableFlattenButton) {
     tableFlattenButton.classList.toggle("active", tableFlatten);

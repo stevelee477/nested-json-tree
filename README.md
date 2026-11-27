@@ -20,17 +20,19 @@ Nested JSON Tree is a read-only viewer for the JSON that ordinary formatters str
 
 ## Highlights
 
-- Open a JSON/JSONC document, a selection, or the clipboard as a collapsible, virtual-scrolled tree.
-- Expand escaped JSON strings, **JWT** tokens, **URL query strings**, and **Base64 / Base64URL** payloads (JSON, Protobuf wire format, or readable text) **inline**, level after level, without leaving the tree.
-- Keep the tree in sync with the editor: reveal any node in the source, highlight the node under the cursor, and refresh automatically as you edit (large documents parse off the Extension Host thread).
+- Open a JSON/JSONC document, a selection, the clipboard, or a file from the Explorer context menu (`.json`, `.jsonc`, `.jsonl`, `.ndjson`, `.log` — or press `Alt+Cmd+J` / `Alt+Ctrl+J`) as a collapsible, virtual-scrolled tree that restores automatically across VS Code window reloads.
+- Expand escaped JSON strings, **JWT** tokens, **URLs / query strings / percent-encoded JSON**, and **Base64 / Base64URL** payloads (plain or **Gzip / Zlib / Deflate**-compressed JSON, Protobuf wire format, or readable text) **inline**, level after level, without leaving the tree.
+- Keep the tree in sync with the editor: reveal any node in the source, highlight the node under the cursor, and refresh automatically as you edit (large documents and nested strings parse off the Extension Host thread, reclaiming worker memory when idle).
 - Accept JSONC line/block comments and trailing commas.
 - Extract valid JSON even when unrelated text appears before or after it.
-- Navigate valid JSONL/NDJSON records in one Tree View without loading the whole document into the parser, filter records by text or `key=value`, list matches, preserve expanded/decoded paths across lines (**Keep view**), or inspect records in **Table view**.
-- Right-click any string to recursively open escaped JSON or supported encoded payloads, or right-click any object/array to open a subtree as a new tree, format it in a new editor, or view object arrays as a sortable/filterable table with CSV export.
+- Navigate valid JSONL/NDJSON records in one Tree View without loading the whole document into the parser, filter records fast by text or `key=value`, **diff against the previous record**, **pin watch fields** across lines, preserve expanded/decoded paths (**Keep view**), or inspect records in **Table view**.
+- Compare any tree or subtree structurally against the clipboard (**Diff Clipboard** / **Compare subtree with clipboard**) with `+added`, `-removed`, and `~changed` (`old → new`) annotations — including cross-decoded diffs inside escaped JSON strings — and filter to **Changes only**.
+- Generate **TypeScript Interfaces**, **JSON Schema (Draft 2020-12)**, **Zod Schemas**, **Go Structs**, or **Python Pydantic** models from any object, array, or decoded string node.
+- Right-click any string to recursively open escaped JSON or supported encoded payloads, open the **Value Inspector** drawer for untruncated multi-line text and UTF-8 byte/line/char counts, or view object arrays as a virtualized, sortable/filterable table with **nested object flattening** and **CSV / TSV / Markdown** export.
 - Open any decoded string as plain text, preserving real newlines and other decoded characters without requiring JSON.
-- Preserve large integers and original tokens such as `"\u0061"` and `"\/"` in display, search, copy, and formatting.
-- Search decoded and raw keys/values incrementally, filter unrelated branches, and navigate results.
-- Navigate via a live **breadcrumb bar**, hover quick-action buttons, depth-level expansion, subtree/sibling controls, collapsed container previews, non-destructive `A→Z` key sorting, and `Cmd/Ctrl+C` / `Shift+Cmd/Ctrl+C` copy shortcuts.
+- Preserve large integers (including 64-bit Snowflake IDs in table sorting, search comparisons, and schema inference) and original tokens such as `"\u0061"` and `"\/"` in display, search, copy, and formatting.
+- Search decoded and raw keys/values incrementally with **case sensitivity (`Aa`)**, **regular expressions (`.*`)**, **scope (`All` / `Keys` / `Values`)**, and **structured field queries** (such as `status>=400`, `env!=prod`, `level=error latency>100`).
+- Navigate via a live **breadcrumb bar**, **pinned watch chips**, hover quick-action buttons, depth-level expansion, subtree/sibling controls, collapsed container previews, non-destructive `A→Z` key sorting, and `Cmd/Ctrl+C` / `Shift+Cmd/Ctrl+C` copy shortcuts.
 - Copy lossless values, decoded strings, exact escaped string literals, JSONPath, and jq filters.
 - Choose between multiple detected JSON candidates.
 - Automatically expand small trees; keep large trees fast and responsive.
@@ -53,8 +55,8 @@ Strings that contain structured payloads show an expand arrow. Click it (or pres
 
 - **Escaped JSON**: appears as a **decoded JSON** child; double-encoded strings unwrap automatically, and nested encoded strings can be expanded further. Search covers decoded content, and **Copy jq path** produces a runnable filter such as `.payload | fromjson | .user.id`. JSONPath cannot cross an encoded string, so it is copied relative to the decoded value.
 - **JWT**: decodes into `header`, `payload`, and `signature` (with expiry status on `exp` claims).
-- **URL query strings**: splits `origin`, `pathname`, `params` (preserving duplicate parameter keys), and `hash`.
-- **Base64 / Base64URL**: automatically detects Base64-encoded JSON, **Protobuf wire format** (field numbers, varints, packed repeated varints, 32/64-bit fixed/floats, nested messages, repeated fields, UTF-8 strings, and hex bytes), and readable UTF-8 text.
+- **URL & percent-encoded payloads**: splits `origin`, `pathname`, `params` (preserving duplicate parameter keys), and `hash` for `http(s)` URLs, custom URI schemes (`ws://`, `wss://`, `grpc://`, `app://`), relative URLs with queries (`/api/v1/items?a=1&b=2`), and standalone query strings (`a=1&b=2&c=3`), plus decodes percent-encoded JSON (`%7B%22…%7D`).
+- **Base64 / Base64URL (including Gzip, Zlib & Deflate)**: automatically detects plain or compressed Base64-encoded JSON (safely capped at 4 MB decompressed output), **Protobuf wire format** (field numbers, varints, packed repeated varints, 32/64-bit fixed/floats, nested messages, repeated fields, UTF-8 strings, and hex bytes), and readable UTF-8 text.
 
 <a href="assets/screenshots/inline-decoding.png"><img src="assets/screenshots/inline-decoding.png" width="760" alt="Escaped JSON strings decoded inline, with timestamp and color hints"></a>
 
@@ -72,9 +74,9 @@ Place the cursor on a record and select **Nested JSON Tree: Open Current Line as
 
 <a href="assets/screenshots/jsonl-current-line.png"><img src="assets/screenshots/jsonl-current-line.png" width="1000" alt="Navigate a JSONL file"></a>
 
-The Tree View keeps the source URI and current line. Use **Prev**, **Next**, or a line number to jump between valid records in the same tab; empty, invalid, and resource-limited lines are skipped. **Keep view** (on by default) preserves your expanded branches, inline-decoded strings, and search query as you step between records. Use the **Filter** box (`text`, `"quoted phrase"`, or `key=value` / `a.b=value`; press `Enter` / `Shift+Enter` for next/previous match) and **List** to pick from matching lines, or click **Table** to inspect up to 500 matching records side by side with column sorting, row filtering, click-to-jump, and CSV copy/export. **Source** reveals the current record in the editor. **Follow cursor** is optional and off by default.
+The Tree View keeps the source URI and current line. Use **Prev**, **Next**, or a line number to jump between valid records in the same tab; empty, invalid, and resource-limited lines are skipped. Click **Diff Prev** to compare the current record structurally against the previous valid record. **Keep view** (on by default) and **Pinned** fields preserve your expanded branches, inline-decoded strings, watched paths, and search query as you step between records. Use the **Filter** box (`text`, `"quoted phrase"`, or `key=value` / `a.b=value`; press `Enter` / `Shift+Enter` for next/previous match) and **List** to pick from matching lines, or click **Table** to inspect up to 500 matching records side by side with column sorting, row filtering, nested object **Flatten**, click-to-jump, and **CSV / TSV / Markdown** export. **Source** reveals the current record in the editor. **Follow cursor** is optional and off by default.
 
-Editor context-menu entries appear only for JSON/JSONC and JSONL/NDJSON files. Both commands remain available through `Cmd+Shift+P` / `Ctrl+Shift+P` for text and log files. With **Follow cursor** on, the node under the cursor is also highlighted within the current line.
+Editor title/context-menu entries support JSON, JSONC, and `jsonl` language modes as well as `.json`, `.jsonc`, `.jsonl`, and `.ndjson` extensions; Explorer context menus also include `.log` files, and `Alt+Cmd+J` (macOS) / `Alt+Ctrl+J` (Windows/Linux) opens the active document or current JSONL line directly. Both commands remain available through `Cmd+Shift+P` / `Ctrl+Shift+P` for any text file. With **Follow cursor** on, the node under the cursor is also highlighted within the current line.
 
 ## Selections, clipboard, and source sync
 
@@ -115,15 +117,16 @@ code --install-extension nested-json-tree-<version>.vsix
 
 - **Expand all / Collapse all** controls every container at once (**Expand all** supports up to 100,000 nodes with virtual scrolling). Use the **Depth…** selector to expand cleanly to Level 1–5, or right-click to **Expand subtree**, **Collapse subtree**, or **Collapse sibling branches**.
 - **A→Z** sorts object keys alphabetically for display without altering array order or copy/source paths. Collapsed objects and arrays display an inline preview of their first entries.
-- **Breadcrumb bar**: shows the path to the focused node with clickable segments to jump up and one-click **JSONPath** / **jq** copy buttons.
-- **Hover / keyboard quick actions**: hover or focus a row for quick buttons (`{}`, `Copy`, `$.`, `↗`), or press `Cmd/Ctrl+C` to copy the focused node's value and `Shift+Cmd/Ctrl+C` to copy its JSONPath.
-- `Cmd+F` / `Ctrl+F` focuses tree search (or table filter when Table view is open).
-- `Enter` and `Shift+Enter` move through search results.
-- `Esc` clears search and restores the previous expansion state.
+- **Breadcrumb & Pinned watch bar**: the breadcrumb bar shows clickable segments and one-click **JSONPath** / **jq** copy buttons; right-click any field and choose **Pin field** to keep compact watch chips (`path: value`) pinned at the top across refreshes and JSONL records.
+- **Value Inspector**: click **Inspector** in the header (or **Inspect value** in the context menu) to inspect the focused node's complete untruncated Host value, path, character/line/UTF-8 byte counts, word-wrap toggle, and one-click copy.
+- **Hover / keyboard quick actions**: hover or focus a row for quick buttons (`{}`, `Copy`, `$.`, `↗`), or press `Cmd/Ctrl+C` to copy the focused node's value (while still allowing inline text selection on values) and `Shift+Cmd/Ctrl+C` to copy its JSONPath.
+- **Search & structured queries**: `Cmd+F` / `Ctrl+F` focuses tree search (or table filter when Table view is open). Toggle **Match case (`Aa`)**, **Regex (`.*`)**, **Scope (`All` / `Keys` / `Values`)**, or **Search decoded (`{}`)**, or enter structured field comparisons like `status>=400`, `env!=prod`, or `level=error latency>100`.
+- `Enter` and `Shift+Enter` move through search results; `Esc` clears search and restores the previous expansion state.
 - While search results are shown, branches can still be expanded or collapsed, and **Collapse all** stays available.
-- Right-click a node (or press `Shift+F10`) to copy its value, key, JSONPath, or jq path, open subtrees as a new tree or formatted JSON editor, or open an array of objects in **Table view** (sortable columns, row filter, click row to jump, **Copy CSV** / **Open CSV**).
+- **Structural Tree Diff & Type generation**: click **Diff Clipboard** (or right-click **Compare subtree with clipboard** / **Diff Prev**) to view structural `+added`, `-removed`, and `~changed` (`old → new`) annotations with a **Changes only** toggle and automatic inner diffing of escaped JSON strings. Choose **Generate types / schema…** on any node to emit **TypeScript**, **JSON Schema**, **Zod**, **Go**, or **Python Pydantic** definitions to a new editor or the clipboard.
+- Right-click a node (or press `Shift+F10`) to copy its value, key, JSONPath, or jq path, open subtrees as a new tree or formatted JSON editor, or open an array of objects in **Table view** (virtualized rows, lossless 64-bit integer sorting, row filter, **Flatten** nested objects into dot-columns, click row to jump even during active search, and **Copy CSV / TSV / MD** or **Open CSV**).
 - Keyboard: `↑`/`↓` move between rows, `PageUp`/`PageDown` jump by page, `→`/`←` expand/collapse or move to the child/parent, `Home`/`End` jump to the first/last row, `Enter`/`Space` toggle a container or open the actions menu.
-- Expansion, search text, sort toggle, and scroll position are restored when you return to a hidden Tree View tab.
+- Expansion, search options, pinned fields, inspector state, sort toggle, scroll position, and document/JSONL panels are restored across hidden tabs and VS Code window reloads.
 - String-node actions can open parsed JSON or open the decoded value unchanged as plain text.
 - Value hints & timestamp conversion: Unix timestamps (seconds, milliseconds, microseconds, nanoseconds — numeric or string-encoded) and **ISO-8601** date-time strings display converted local time and relative time (`3m ago`, `in 2d`, plus `expired` warnings on past `exp`/`expiresAt` fields), with UTC, local, and relative time in the tooltip; strings show their length; colors such as `#3b82f6` or `rgb(…)` get a swatch; `Cmd`/`Ctrl`+click opens an `http(s)` link.
 
