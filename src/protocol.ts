@@ -20,7 +20,10 @@ export type NodeAction =
   | "copyJqPath"
   | "openLink"
   | "revealInSource"
-  | "expandDecoded";
+  | "expandDecoded"
+  | "inspectNode"
+  | "generateTypes"
+  | "diffSubtreeWithClipboard";
 
 export const NODE_ACTIONS: ReadonlySet<string> = new Set<NodeAction>([
   "openNested",
@@ -39,7 +42,12 @@ export const NODE_ACTIONS: ReadonlySet<string> = new Set<NodeAction>([
   "openLink",
   "revealInSource",
   "expandDecoded",
+  "inspectNode",
+  "generateTypes",
+  "diffSubtreeWithClipboard",
 ]);
+
+export type TableExportFormat = "csv" | "tsv" | "markdown";
 
 export interface JsonlViewState {
   lineNumber: number;
@@ -61,6 +69,30 @@ export interface SourceViewState {
   canRefresh: boolean;
 }
 
+/** Serializable source descriptor persisted in Webview state for panel revival. */
+export interface PanelSourceDescriptor {
+  kind: "document" | "jsonl";
+  uri: string;
+  lineNumber?: number;
+}
+
+export interface RenderDiffSummary {
+  added: number;
+  removed: number;
+  changed: number;
+  unchanged: number;
+}
+
+export interface RenderDiffNodeAnnotation {
+  status: "added" | "removed" | "changed";
+  oldRaw?: string;
+}
+
+export interface RenderDiffPayload {
+  summary: RenderDiffSummary;
+  annotations: Record<number, RenderDiffNodeAnnotation>;
+}
+
 export interface RenderMessage {
   type: "render";
   /** Changes whenever the panel shows a different value; keys saved Webview state. */
@@ -76,6 +108,10 @@ export interface RenderMessage {
   jsonl?: JsonlViewState;
   /** Present for trees parsed from a document or selection (not JSONL panels). */
   source?: SourceViewState;
+  /** Serializable source identity for WebviewPanelSerializer revival. */
+  panelSource?: PanelSourceDescriptor;
+  /** Structural diff annotations when displaying a tree comparison. */
+  diff?: RenderDiffPayload;
   /** The same source was re-parsed: keep expansion, search, and scroll by structure. */
   preserveView?: boolean;
 }
@@ -122,6 +158,19 @@ export interface TableDataMessage {
   table: TableModel;
 }
 
+export interface NodeInspectionMessage {
+  type: "nodeInspection";
+  nodeId: number;
+  path: string;
+  nodeType: string;
+  fullValue: string;
+  rawToken?: string;
+  byteLength: number;
+  charLength: number;
+  lineCount: number;
+  childCount?: number;
+}
+
 export type HostToWebviewMessage =
   | RenderMessage
   | JsonlStateMessage
@@ -130,7 +179,8 @@ export type HostToWebviewMessage =
   | DecodeFailedMessage
   | DecodedBatchMessage
   | RevealNodeMessage
-  | TableDataMessage;
+  | TableDataMessage
+  | NodeInspectionMessage;
 
 export type WebviewToHostMessage =
   | { type: "ready" }
@@ -143,7 +193,11 @@ export type WebviewToHostMessage =
   | { type: "setJsonlFilter"; query: string }
   | { type: "listJsonlMatches"; query: string }
   | { type: "openJsonlTable"; query: string }
-  | { type: "exportTable"; mode: "copy" | "open"; rowIndices: number[] }
+  | { type: "exportTable"; mode: "copy" | "open"; rowIndices: number[]; format?: TableExportFormat }
+  | { type: "reopenTable"; flatten: boolean }
+  | { type: "diffWithClipboard" }
+  | { type: "diffJsonlPrevious" }
+  | { type: "savePanelViewState"; state: unknown }
   | { type: "revealSource" }
   | { type: "previousJsonl" | "nextJsonl"; query?: string }
   | { type: "goToJsonlLine"; lineNumber: number };

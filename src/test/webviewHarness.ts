@@ -1,7 +1,7 @@
 /** Minimal DOM harness for executing the actual embedded Webview script. */
 export function createWebviewHarness(
   script: string,
-  api: { getState?: () => unknown; setState?: (state: unknown) => void } = {},
+  api: { getState?: () => unknown; setState?: (state: unknown) => void; getSelectionText?: () => string } = {},
   l10nBundle?: Record<string, string>,
 ) {
   class FakeClassList {
@@ -28,6 +28,7 @@ export function createWebviewHarness(
   }
 
   let activeElement: FakeElement | undefined;
+  let selectionText = "";
   const setActiveElement = (element: FakeElement | undefined): void => {
     activeElement = element;
   };
@@ -71,6 +72,10 @@ export function createWebviewHarness(
       this.tagName = tagName.toUpperCase();
     }
 
+    get firstChild(): FakeElement | null {
+      return this.children[0] ?? null;
+    }
+
     addEventListener(type: string, listener: (event: unknown) => void): void {
       const listeners = this.listeners.get(type) ?? [];
       listeners.push(listener);
@@ -83,13 +88,47 @@ export function createWebviewHarness(
 
     appendChild(child: FakeElement): FakeElement {
       if (child.fragment) {
-        for (const item of child.children) {
+        const items = child.children.splice(0);
+        for (const item of items) {
+          if (item.parentElement) item.parentElement.removeChild(item);
           item.parentElement = this;
           this.children.push(item);
         }
       } else {
+        if (child.parentElement) child.parentElement.removeChild(child);
         child.parentElement = this;
         this.children.push(child);
+      }
+      return child;
+    }
+
+    removeChild(child: FakeElement): FakeElement {
+      const idx = this.children.indexOf(child);
+      if (idx >= 0) {
+        this.children.splice(idx, 1);
+        child.parentElement = undefined;
+      }
+      return child;
+    }
+
+    insertBefore(child: FakeElement, reference: FakeElement | null | undefined): FakeElement {
+      if (!reference) return this.appendChild(child);
+      const refIdx = this.children.indexOf(reference);
+      if (refIdx < 0) return this.appendChild(child);
+      if (child.fragment) {
+        const items = child.children.splice(0);
+        for (let i = 0; i < items.length; i += 1) {
+          const item = items[i];
+          if (item.parentElement) item.parentElement.removeChild(item);
+          item.parentElement = this;
+        }
+        const currentRefIdx = this.children.indexOf(reference);
+        this.children.splice(currentRefIdx >= 0 ? currentRefIdx : this.children.length, 0, ...items);
+      } else {
+        if (child.parentElement) child.parentElement.removeChild(child);
+        child.parentElement = this;
+        const currentRefIdx = this.children.indexOf(reference);
+        this.children.splice(currentRefIdx >= 0 ? currentRefIdx : this.children.length, 0, child);
       }
       return child;
     }
@@ -167,11 +206,16 @@ export function createWebviewHarness(
     "tree",
     "menu",
     "search-input",
+    "search-case",
+    "search-regex",
+    "search-scope",
     "search-count",
     "search-scope-warning",
     "previous-match",
     "next-match",
     "clear-search",
+    "diff-clipboard",
+    "toggle-inspector",
     "expand-all",
     "collapse-all",
     "expand-depth",
@@ -179,9 +223,16 @@ export function createWebviewHarness(
     "empty-search",
     "title",
     "path",
+    "diff-bar",
+    "diff-added-count",
+    "diff-removed-count",
+    "diff-changed-count",
+    "diff-unchanged-count",
+    "diff-changes-only",
     "jsonl-bar",
     "previous-jsonl",
     "next-jsonl",
+    "jsonl-diff-prev",
     "jsonl-line",
     "jsonl-total",
     "go-jsonl",
@@ -199,17 +250,31 @@ export function createWebviewHarness(
     "refresh-source",
     "source-status",
     "search-decoded",
+    "pinned-bar",
+    "pinned-chips",
+    "pinned-clear",
     "breadcrumb-bar",
     "breadcrumb-segments",
     "breadcrumb-copy-jsonpath",
     "breadcrumb-copy-jq",
+    "inspector-drawer",
+    "inspector-path",
+    "inspector-meta",
+    "inspector-wrap",
+    "inspector-copy",
+    "inspector-close",
+    "inspector-content",
     "table-view",
     "table-title",
     "table-filter",
     "table-count",
+    "table-flatten",
     "table-copy-csv",
+    "table-copy-tsv",
+    "table-copy-md",
     "table-export-csv",
     "table-close",
+    "table-container",
     "data-table",
   ];
   const elements = new Map(elementIds.map((id) => [id, new FakeElement(false, id === "data-table" ? "TABLE" : "DIV")]));
@@ -218,6 +283,12 @@ export function createWebviewHarness(
   dataTable.appendChild(new FakeElement(false, "TBODY"));
   elements.get("table-view")!.classList.add("hidden");
   elements.get("menu")!.classList.add("hidden");
+  elements.get("inspector-drawer")!.classList.add("hidden");
+  elements.get("pinned-bar")!.classList.add("hidden");
+  elements.get("diff-bar")!.classList.add("hidden");
+  elements.get("inspector-wrap")!.classList.add("active");
+  elements.get("inspector-content")!.classList.add("wrap");
+  elements.get("search-scope")!.value = "all";
 
   if (l10nBundle !== undefined) {
     const bundle = new FakeElement();
@@ -244,7 +315,7 @@ export function createWebviewHarness(
   const window = {
     innerWidth: 1_000,
     innerHeight: 800,
-    getSelection: () => ({ toString: () => "" }),
+    getSelection: () => ({ toString: () => (api.getSelectionText ? api.getSelectionText() : selectionText) }),
     addEventListener: (type: string, listener: (event: { data: unknown }) => void) => {
       const listeners = windowListeners.get(type) ?? [];
       listeners.push(listener);
@@ -285,5 +356,8 @@ export function createWebviewHarness(
   const send = (data: unknown): void => {
     for (const listener of windowListeners.get("message") ?? []) listener({ data });
   };
-  return { elements, windowListeners, docListeners, timers, drainTimers, posted, send };
+  const setSelectionText = (text: string): void => {
+    selectionText = text;
+  };
+  return { elements, windowListeners, docListeners, timers, drainTimers, posted, send, setSelectionText };
 }

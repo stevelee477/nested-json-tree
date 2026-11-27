@@ -57,16 +57,31 @@ test("Tree View markup includes accessible search and tree controls", () => {
     "source-status",
     "expand-depth",
     "sort-keys",
+    "diff-clipboard",
+    "toggle-inspector",
+    "diff-bar",
+    "diff-changes-only",
+    "jsonl-diff-prev",
+    "search-case",
+    "search-regex",
+    "search-scope",
+    "pinned-bar",
+    "pinned-chips",
     "breadcrumb-bar",
     "breadcrumb-segments",
+    "inspector-drawer",
+    "inspector-content",
     "table-view",
+    "table-flatten",
+    "table-copy-tsv",
+    "table-copy-md",
   ]) {
     assert.match(markup, new RegExp(`id="${id}"`));
   }
 });
 
 test("search runs incrementally inside the Webview", () => {
-  assert.match(webviewSource, /createJsonTreeSearchState\(currentRoot as never, query\)/);
+  assert.match(webviewSource, /createSearchState\(currentRoot as never, query, 5_000, options\)/);
   assert.match(webviewSource, /advanceJsonTreeSearch\(state, 2_000\)/);
   assert.match(webviewSource, /searchExactIds\.has\(/);
 });
@@ -83,9 +98,12 @@ test("Webview actions send only host-resolved node IDs", () => {
     "copyRawKey",
     "copyJsonPath",
     "copyJqPath",
+    "generateTypes",
+    "diffSubtreeWithClipboard",
   ]) {
     assert.match(webviewSource, new RegExp(`type: "${type}", nodeId: model\\.id`));
   }
+  assert.match(webviewSource, /type: "inspectNode", nodeId: focusedNodeId/);
   assert.match(webviewSource, /Copy raw key token/);
   assert.doesNotMatch(webviewSource, /vscode\.postMessage\(\{[^}]*\b(?:text|path)\s*:/);
   assert.doesNotMatch(hostSource, /message\.(?:text|path)\b/);
@@ -857,6 +875,7 @@ test("JSONL filter, keep-view, and table view filter/sort/export/jump work end-t
   // Filter table rows and export CSV.
   harness.elements.get("table-filter")!.value = "alpha";
   harness.elements.get("table-filter")!.dispatch("input");
+  harness.drainTimers();
   assert.equal(tbody.children.length, 1);
   harness.elements.get("table-copy-csv")!.dispatch("click");
   assert.deepEqual(harness.posted.at(-1), { type: "exportTable", mode: "copy", rowIndices: [1] });
@@ -865,4 +884,407 @@ test("JSONL filter, keep-view, and table view filter/sort/export/jump work end-t
   tbody.children[0].dispatch("click");
   assert.deepEqual(harness.posted.at(-1), { type: "goToJsonlLine", lineNumber: 2 });
   assert.equal(harness.elements.get("table-view")!.classList.contains("hidden"), true);
+});
+
+test("table view sorts 64-bit Snowflake BigInts losslessly, rejects hex/whitespace numbers, and shows column truncation", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  renderTree(harness, { id: 0, type: "object", children: [] });
+  harness.drainTimers();
+
+  harness.send({
+    type: "tableData",
+    table: {
+      title: "snowflakes",
+      columns: ["snowflake", "token"],
+      rows: [
+        { rowLabel: "[0]", targetNodeId: 1, cells: ["9007199254740993", "20"] },
+        { rowLabel: "[1]", targetNodeId: 2, cells: ["9007199254740992", "0x10"] },
+        { rowLabel: "[2]", targetNodeId: 3, cells: ["-100", "   "] },
+        { rowLabel: "[3]", targetNodeId: 4, cells: ["42", "-5"] },
+        { rowLabel: "[4]", targetNodeId: 5, cells: ["7", "2"] },
+      ],
+      truncated: false,
+      truncatedColumns: true,
+      sourceKind: "array",
+    },
+  });
+
+  assert.match(harness.elements.get("table-count")!.textContent, /5 rows \(columns truncated\)/);
+  const thead = harness.elements.get("data-table")!.querySelector("thead")!;
+  const tbody = harness.elements.get("data-table")!.querySelector("tbody")!;
+
+  // Sort by snowflake ascending: -100, 7, 42, 9007199254740992, 9007199254740993.
+  thead.children[0].children[1].dispatch("click");
+  assert.deepEqual(
+    tbody.children.map((tr) => tr.children[1].textContent),
+    ["-100", "7", "42", "9007199254740992", "9007199254740993"],
+  );
+
+  // Sort by token ascending: strict numbers (-5, 2, 20) sort numerically; "   " and "0x10" are NOT parsed as 0 or 16.
+  thead.children[0].children[2].dispatch("click");
+  assert.deepEqual(
+    tbody.children.map((tr) => tr.children[2].textContent),
+    ["-5", "2", "20", "   ", "0x10"],
+  );
+
+  // Both rows and columns truncated indicator.
+  harness.send({
+    type: "tableData",
+    table: {
+      title: "both",
+      columns: ["a"],
+      rows: [{ rowLabel: "[0]", cells: ["1"] }],
+      truncated: true,
+      truncatedColumns: true,
+      sourceKind: "array",
+    },
+  });
+  assert.match(harness.elements.get("table-count")!.textContent, /rows & columns truncated/);
+});
+
+test("clicking a table row jumps to and focuses the target node even while search is active", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  const treeData = {
+    id: 0,
+    type: "object",
+    children: [
+      {
+        key: "items",
+        rawKey: '"items"',
+        value: {
+          id: 1,
+          type: "array",
+          children: [
+            {
+              key: 0,
+              value: {
+                id: 2,
+                type: "object",
+                children: [{ key: "name", rawKey: '"name"', value: { id: 3, type: "string", raw: '"needle"', value: "needle" } }],
+              },
+            },
+            {
+              key: 1,
+              value: {
+                id: 4,
+                type: "object",
+                children: [{ key: "name", rawKey: '"name"', value: { id: 5, type: "string", raw: '"other"', value: "other" } }],
+              },
+            },
+          ],
+        },
+      },
+    ],
+  };
+  renderTree(harness, treeData);
+  harness.drainTimers();
+  searchFor(harness, "needle");
+  // Node 4 is hidden because it did not match "needle".
+  assert.equal(renderedNodes(harness).some((n) => n.getAttribute("data-node-id") === "4"), false);
+
+  harness.send({
+    type: "tableData",
+    table: {
+      title: "$.items",
+      columns: ["name"],
+      rows: [
+        { rowLabel: "[0]", targetNodeId: 2, cells: ["needle"] },
+        { rowLabel: "[1]", targetNodeId: 4, cells: ["other"] },
+      ],
+      truncated: false,
+      truncatedColumns: false,
+      sourceKind: "array",
+    },
+  });
+
+  const tbody = harness.elements.get("data-table")!.querySelector("tbody")!;
+  tbody.children[1].dispatch("click");
+  harness.drainTimers();
+
+  assert.equal(harness.elements.get("table-view")!.classList.contains("hidden"), true);
+  const revealedTarget = nodeById(harness, 4);
+  assert.equal(rowParts(revealedTarget).row.classList.contains("cursor-match"), true);
+  assert.equal(revealedTarget.tabIndex, 0);
+});
+
+test("table view virtualizes large row counts, debounces filter input, and supports flatten/TSV/Markdown actions", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  renderTree(harness, { id: 0, type: "object", children: [] });
+  harness.drainTimers();
+
+  const rows = Array.from({ length: 400 }, (_, i) => ({
+    rowLabel: `[${i}]`,
+    targetNodeId: i + 1,
+    cells: [String(i), `item_${i}`],
+  }));
+  harness.send({
+    type: "tableData",
+    table: {
+      title: "large",
+      columns: ["idx", "label"],
+      rows,
+      truncated: false,
+      truncatedColumns: false,
+      sourceKind: "array",
+    },
+  });
+
+  const tbody = harness.elements.get("data-table")!.querySelector("tbody")!;
+  assert.ok(tbody.children.length < 100, `expected virtualized tbody, got ${tbody.children.length}`);
+  assert.equal(tbody.children.at(-1)!.className, "table-spacer-row");
+
+  const container = harness.elements.get("table-container")!;
+  container.scrollTop = 27 * 200;
+  container.dispatch("scroll");
+  assert.equal(tbody.children[0].className, "table-spacer-row");
+  assert.ok(tbody.children.some((tr) => tr.getAttribute("data-row-index") === "200"));
+
+  // Flatten toggle and TSV / Markdown copy buttons.
+  harness.elements.get("table-flatten")!.dispatch("click");
+  assert.deepEqual(harness.posted.at(-1), { type: "reopenTable", flatten: true });
+  harness.elements.get("table-copy-tsv")!.dispatch("click");
+  assert.equal(harness.posted.at(-1)?.type, "exportTable");
+  assert.equal(harness.posted.at(-1)?.format, "tsv");
+  harness.elements.get("table-copy-md")!.dispatch("click");
+  assert.equal(harness.posted.at(-1)?.type, "exportTable");
+  assert.equal(harness.posted.at(-1)?.format, "markdown");
+});
+
+test("virtual scrolling recycles surviving DOM row elements across scroll events", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  const children = Array.from({ length: 500 }, (_, index) => ({
+    key: index,
+    value: { id: index + 1, type: "number", raw: String(index) },
+  }));
+  renderTree(harness, { id: 0, type: "array", children });
+  harness.drainTimers();
+
+  const node20Before = nodeById(harness, 20);
+  const treeEl = harness.elements.get("tree")!;
+  treeEl.scrollTop = 22 * 18;
+  treeEl.dispatch("scroll");
+  harness.drainTimers();
+
+  const node20After = nodeById(harness, 20);
+  assert.equal(node20After, node20Before, "surviving row element must be recycled without recreation");
+});
+
+test("non-empty text selection preserves drag selection on row click and lets native Cmd+C run", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  renderTree(harness, arrayOfSmallObjects(2), { autoExpand: true });
+  harness.drainTimers();
+
+  assert.equal(nodeById(harness, 1).getAttribute("aria-expanded"), "true");
+  harness.setSelectionText("selected-substring");
+
+  // Clicking row body while text is selected focuses without collapsing the node.
+  rowParts(nodeById(harness, 1)).value.dispatch("click");
+  assert.equal(nodeById(harness, 1).getAttribute("aria-expanded"), "true");
+
+  // Cmd+C with active text selection does not post copyValue, letting browser copy selection.
+  const postedCountBefore = harness.posted.length;
+  harness.elements.get("tree")!.dispatch("keydown", { key: "c", metaKey: true, shiftKey: false, preventDefault() {} });
+  assert.equal(harness.posted.length, postedCountBefore);
+
+  // Clicking the disclosure toggle still collapses even if text is selected.
+  rowParts(nodeById(harness, 1)).toggle.dispatch("click");
+  assert.equal(nodeById(harness, 1).getAttribute("aria-expanded"), "false");
+});
+
+test("search toggles (case, regex, scope) persist and surface invalid regex errors gracefully", () => {
+  let saved: unknown;
+  const api = { getState: () => saved, setState: (s: unknown) => { saved = s; } };
+  const harness = createWebviewHarness(embeddedWebviewScript(), api);
+  renderTree(harness, arrayOfSmallObjects(3), { renderKey: 9 });
+  harness.drainTimers();
+
+  harness.elements.get("search-case")!.dispatch("click");
+  harness.elements.get("search-regex")!.dispatch("click");
+  harness.elements.get("search-scope")!.value = "values";
+  harness.elements.get("search-scope")!.dispatch("change");
+  assert.equal(harness.elements.get("search-case")!.getAttribute("aria-pressed"), "true");
+  assert.equal(harness.elements.get("search-regex")!.getAttribute("aria-pressed"), "true");
+
+  searchFor(harness, "[unclosed");
+  assert.equal(harness.elements.get("search-count")!.textContent, "Invalid regex");
+  assert.equal(harness.elements.get("search-count")!.classList.contains("search-error"), true);
+  assert.ok(renderedNodes(harness).length > 0, "invalid regex must not blank out the tree");
+
+  searchFor(harness, "1");
+  assert.equal(harness.elements.get("search-count")!.classList.contains("search-error"), false);
+  const persisted = saved as { searchCaseSensitive: boolean; searchRegex: boolean; searchScope: string };
+  assert.equal(persisted.searchCaseSensitive, true);
+  assert.equal(persisted.searchRegex, true);
+  assert.equal(persisted.searchScope, "values");
+});
+
+test("Value Inspector drawer toggles, tracks focus, fetches full Host inspection, wraps, and copies", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  renderTree(harness, {
+    id: 0,
+    type: "object",
+    children: [
+      { key: "msg", rawKey: '"msg"', value: { id: 1, type: "string", raw: '"line1\\nline2"', value: "line1\nline2" } },
+      { key: "code", rawKey: '"code"', value: { id: 2, type: "number", raw: "200" } },
+    ],
+  }, { autoExpand: true });
+  harness.drainTimers();
+
+  // Open via context menu "Inspect value".
+  rowParts(nodeByKey(harness, "msg")).row.dispatch("contextmenu", { clientX: 10, clientY: 10, preventDefault() {} });
+  const inspectItem = harness.elements.get("menu")!.children.find((el) => el.textContent === "Inspect value")!;
+  inspectItem.dispatch("click");
+
+  const drawer = harness.elements.get("inspector-drawer")!;
+  assert.equal(drawer.classList.contains("hidden"), false);
+  assert.deepEqual(harness.posted.at(-1), { type: "inspectNode", nodeId: 1 });
+  assert.equal(harness.elements.get("inspector-content")!.textContent, "line1\nline2");
+
+  // Host sends untruncated inspection metadata.
+  harness.send({
+    type: "nodeInspection",
+    nodeId: 1,
+    path: "$.msg",
+    nodeType: "string",
+    fullValue: "line1\nline2\nfull",
+    byteLength: 16,
+    charLength: 16,
+    lineCount: 3,
+  });
+  assert.equal(harness.elements.get("inspector-path")!.textContent, "$.msg");
+  assert.match(harness.elements.get("inspector-meta")!.textContent, /16 chars · 3 lines · 16 B/);
+  assert.equal(harness.elements.get("inspector-content")!.textContent, "line1\nline2\nfull");
+
+  // Moving focus automatically updates inspector and posts inspectNode for new node.
+  rowParts(nodeByKey(harness, "code")).row.dispatch("click");
+  assert.deepEqual(harness.posted.at(-1), { type: "inspectNode", nodeId: 2 });
+
+  // Word wrap toggle and copy button.
+  harness.elements.get("inspector-wrap")!.dispatch("click");
+  assert.equal(harness.elements.get("inspector-content")!.classList.contains("wrap"), false);
+  harness.elements.get("inspector-copy")!.dispatch("click");
+  assert.deepEqual(harness.posted.at(-1), { type: "copyValue", nodeId: 2 });
+
+  harness.elements.get("inspector-close")!.dispatch("click");
+  assert.equal(drawer.classList.contains("hidden"), true);
+});
+
+test("Pinned Watch Paths pin/unpin, jump on click, and re-resolve across JSONL records", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  renderTree(harness, {
+    id: 0,
+    type: "object",
+    children: [
+      {
+        key: "user",
+        rawKey: '"user"',
+        value: {
+          id: 1,
+          type: "object",
+          children: [{ key: "role", rawKey: '"role"', value: { id: 2, type: "string", raw: '"admin"', value: "admin" } }],
+        },
+      },
+    ],
+  }, { renderKey: 1, autoExpand: true });
+  harness.drainTimers();
+
+  // Root node does not show "Pin field"; non-root node does.
+  rowParts(nodeById(harness, 0)).row.dispatch("contextmenu", { clientX: 0, clientY: 0, preventDefault() {} });
+  assert.equal(harness.elements.get("menu")!.children.some((el) => el.textContent === "Pin field"), false);
+
+  rowParts(nodeByKey(harness, "role")).row.dispatch("contextmenu", { clientX: 0, clientY: 0, preventDefault() {} });
+  harness.elements.get("menu")!.children.find((el) => el.textContent === "Pin field")!.dispatch("click");
+
+  const pinnedBar = harness.elements.get("pinned-bar")!;
+  const chips = harness.elements.get("pinned-chips")!;
+  assert.equal(pinnedBar.classList.contains("hidden"), false);
+  assert.equal(chips.children.length, 1);
+  assert.equal(chips.children[0].children[0].children[0].textContent, "user.role");
+  assert.equal(chips.children[0].children[0].children[2].textContent, "admin");
+
+  // Navigate to next JSONL record with different IDs and value: chip re-resolves automatically.
+  renderTree(harness, {
+    id: 10,
+    type: "object",
+    children: [
+      { key: "extra", rawKey: '"extra"', value: { id: 11, type: "number", raw: "1" } },
+      {
+        key: "user",
+        rawKey: '"user"',
+        value: {
+          id: 12,
+          type: "object",
+          children: [{ key: "role", rawKey: '"role"', value: { id: 13, type: "string", raw: '"viewer"', value: "viewer" } }],
+        },
+      },
+    ],
+  }, { renderKey: 2, canExpandAll: false });
+  harness.drainTimers();
+
+  assert.equal(chips.children[0].children[0].children[2].textContent, "viewer");
+  // Clicking chip expands collapsed ancestors and focuses node 13.
+  chips.children[0].children[0].dispatch("click");
+  harness.drainTimers();
+  assert.equal(nodeById(harness, 13).tabIndex, 0);
+
+  // Removing via × hides pinned bar.
+  chips.children[0].children[1].dispatch("click");
+  assert.equal(pinnedBar.classList.contains("hidden"), true);
+});
+
+test("Diff & Type Gen UI renders diff summary, oldRaw -> new badges, Changes only filter, and Host actions", () => {
+  const harness = createWebviewHarness(embeddedWebviewScript());
+  renderTree(
+    harness,
+    {
+      id: 0,
+      type: "object",
+      children: [
+        { key: "same", rawKey: '"same"', value: { id: 1, type: "number", raw: "1" } },
+        { key: "status", rawKey: '"status"', value: { id: 2, type: "number", raw: "500" } },
+        { key: "addedKey", rawKey: '"addedKey"', value: { id: 3, type: "boolean", raw: "true", value: true } },
+        { key: "removedKey", rawKey: '"removedKey"', value: { id: 4, type: "string", raw: '"old"', value: "old" } },
+      ],
+    },
+    {
+      autoExpand: true,
+      jsonl: { lineNumber: 2, lineCount: 5, followCursor: false, status: "" },
+      diff: {
+        summary: { added: 1, removed: 1, changed: 1, unchanged: 1 },
+        annotations: {
+          2: { status: "changed", oldRaw: "200" },
+          3: { status: "added" },
+          4: { status: "removed" },
+        },
+      },
+    },
+  );
+  harness.drainTimers();
+
+  assert.equal(harness.elements.get("diff-bar")!.classList.contains("hidden"), false);
+  assert.equal(harness.elements.get("diff-added-count")!.textContent, "+1");
+  assert.equal(harness.elements.get("diff-removed-count")!.textContent, "-1");
+  assert.equal(harness.elements.get("diff-changed-count")!.textContent, "~1");
+
+  const statusRow = nodeByKey(harness, "status").children[0];
+  assert.equal(statusRow.classList.contains("diff-changed"), true);
+  const oldVal = statusRow.children.find((el) => el.className === "diff-old-value");
+  assert.equal(oldVal?.textContent, "200 → ");
+
+  // Changes only filter hides unchanged "same" row.
+  const changesOnly = harness.elements.get("diff-changes-only")!;
+  changesOnly.checked = true;
+  changesOnly.dispatch("change");
+  assert.equal(renderedNodes(harness).some((n) => rowParts(n).key.textContent === "same"), false);
+  assert.equal(renderedNodes(harness).some((n) => rowParts(n).key.textContent === "status"), true);
+
+  // Header & context menu diff/schema buttons post expected messages.
+  harness.elements.get("diff-clipboard")!.dispatch("click");
+  assert.deepEqual(harness.posted.at(-1), { type: "diffWithClipboard" });
+  harness.elements.get("jsonl-diff-prev")!.dispatch("click");
+  assert.deepEqual(harness.posted.at(-1), { type: "diffJsonlPrevious" });
+
+  rowParts(nodeByKey(harness, "status")).row.dispatch("contextmenu", { clientX: 0, clientY: 0, preventDefault() {} });
+  harness.elements.get("menu")!.children.find((el) => el.textContent === "Generate types / schema…")!.dispatch("click");
+  assert.deepEqual(harness.posted.at(-1), { type: "generateTypes", nodeId: 2 });
 });
