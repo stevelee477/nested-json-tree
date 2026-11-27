@@ -159,3 +159,86 @@ test("the Simplified Chinese bundle localizes markup and runtime strings", async
   assert.deepEqual(errors, []);
   await page.close();
 });
+
+test("Value Inspector, Pinned fields, Search toggles, Diff view, and virtualized Table work under strict CSP", async () => {
+  const { page, errors } = await open();
+
+  // Pin a field and verify chip renders and jumps on click.
+  await row(page, "requestId").click({ button: "right" });
+  await page.locator(".menu-item", { hasText: "Pin field" }).click();
+  await page.locator("#pinned-bar:not(.hidden)").waitFor();
+  assert.match((await page.locator(".pinned-chip").first().textContent()) ?? "", /requestId:\s*req_demo_4096/);
+
+  // Toggle Value Inspector drawer and verify focus tracking + wrap toggle.
+  await page.click("#toggle-inspector");
+  await page.locator("#inspector-drawer:not(.hidden)").waitFor();
+  await row(page, "docs").click();
+  assert.equal(await page.textContent("#inspector-path"), "$.docs");
+  assert.equal(await page.textContent("#inspector-content"), "https://example.com/docs");
+  await page.click("#inspector-wrap");
+  assert.equal(await page.getAttribute("#inspector-wrap", "aria-pressed"), "false");
+
+  // Search regex invalid indicator does not throw or violate CSP.
+  await page.click("#search-regex");
+  await page.fill("#search-input", "[unclosed");
+  await page.waitForFunction(() => document.getElementById("search-count")?.textContent === "Invalid regex");
+  await page.click("#clear-search");
+
+  // Virtualized table (>100 rows) + BigInt sort under strict CSP (CSSOM spacer heights).
+  await page.evaluate(() => {
+    const rows = Array.from({ length: 250 }, (_, i) => ({
+      rowLabel: `[${i}]`,
+      cells: [i === 0 ? "9007199254740993" : i === 1 ? "9007199254740992" : String(i)],
+    }));
+    window.postMessage({
+      type: "tableData",
+      table: {
+        title: "big-table",
+        columns: ["snowflake"],
+        rows,
+        truncated: false,
+        truncatedColumns: true,
+        sourceKind: "array",
+      },
+    }, "*");
+  });
+  await page.locator("#table-view:not(.hidden)").waitFor();
+  const mountedTrCount = await page.locator("#data-table tbody tr").count();
+  assert.ok(mountedTrCount < 100, `expected virtualized table rows, got ${mountedTrCount}`);
+  await page.click("#table-close");
+
+  // Diff render view under strict CSP.
+  await page.evaluate(() => {
+    window.postMessage({
+      type: "render",
+      renderKey: 77,
+      title: "Diff",
+      pathLabel: "$",
+      truncatedFieldCount: 0,
+      autoExpand: true,
+      canExpandAll: true,
+      expandAllLimit: 100000,
+      root: {
+        id: 0,
+        type: "object",
+        children: [
+          { key: "same", rawKey: '"same"', value: { id: 1, type: "number", raw: "1" } },
+          { key: "latency", rawKey: '"latency"', value: { id: 2, type: "number", raw: "450" } },
+        ],
+      },
+      diff: {
+        summary: { added: 0, removed: 0, changed: 1, unchanged: 1 },
+        annotations: { 2: { status: "changed", oldRaw: "120" } },
+      },
+    }, "*");
+  });
+  await page.locator("#diff-bar:not(.hidden)").waitFor();
+  assert.equal(await page.textContent("#diff-changed-count"), "~1");
+  assert.equal(await row(page, "latency").locator(".diff-old-value").textContent(), "120 → ");
+  await page.check("#diff-changes-only");
+  assert.equal(await row(page, "same").count(), 0);
+  assert.equal(await row(page, "latency").count(), 1);
+
+  assert.deepEqual(errors, []);
+  await page.close();
+});

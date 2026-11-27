@@ -3,6 +3,9 @@ import type {
   HostToWebviewMessage,
   JsonlViewState,
   NodeAction,
+  NodeInspectionMessage,
+  PanelSourceDescriptor,
+  RenderDiffPayload,
   RenderMessage,
   SourceViewState,
   WebviewToHostMessage,
@@ -18,6 +21,25 @@ interface VsCodeApi {
 
 declare function acquireVsCodeApi(): VsCodeApi;
 
+type SearchScope = "all" | "keys" | "values";
+
+interface SearchOptionsCompat {
+  caseSensitive?: boolean;
+  regex?: boolean;
+  scope?: SearchScope;
+}
+
+type SearchStateCompat = JsonTreeSearchState & { invalidRegex?: string };
+
+const createSearchState = createJsonTreeSearchState as unknown as (
+  root: unknown,
+  query: string,
+  maxMatches?: number,
+  options?: SearchOptionsCompat,
+) => SearchStateCompat;
+
+type WebviewPathStep = number | { key: string; occurrence: number } | "decoded";
+
 /** Survives the Webview being discarded while its tab is hidden. */
 interface SavedViewState {
   renderKey: number;
@@ -25,7 +47,17 @@ interface SavedViewState {
   query: string;
   scrollTop: number;
   searchDecoded?: boolean;
+  searchCaseSensitive?: boolean;
+  searchRegex?: boolean;
+  searchScope?: SearchScope;
   sortKeys?: boolean;
+  pinnedPaths?: WebviewPathStep[][];
+  inspectorOpen?: boolean;
+  inspectorWrap?: boolean;
+  panelSource?: PanelSourceDescriptor;
+  kind?: PanelSourceDescriptor["kind"];
+  uri?: string;
+  lineNumber?: number;
 }
 
 interface EdgeInfo {
@@ -48,12 +80,17 @@ interface VisibleRow {
   edge: EdgeInfo | undefined;
 }
 
-type WebviewPathStep = number | { key: string; occurrence: number } | "decoded";
-
 const ROW_HEIGHT = 22;
 const OVERSCAN_ROWS = 15;
 const TREE_OPERATION_CHUNK_SIZE = 500;
 const MAX_SUBTREE_EXPAND_NODES = 50_000;
+const TABLE_VIRTUALIZE_THRESHOLD = 100;
+const TABLE_ROW_HEIGHT = 27;
+const TABLE_OVERSCAN_ROWS = 20;
+const TABLE_FILTER_DEBOUNCE_MS = 80;
+
+const STRICT_NUMBER_RE = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+const STRICT_INT_RE = /^-?(?:0|[1-9]\d*)$/;
 
 const strings = readL10nBundle();
 const vscode = acquireVsCodeApi();
@@ -62,21 +99,33 @@ const byId = <T extends HTMLElement>(id: string): T => document.getElementById(i
 const tree = byId<HTMLElement>("tree");
 const menu = byId<HTMLDivElement>("menu");
 const searchInput = byId<HTMLInputElement>("search-input");
+const searchCaseButton = byId<HTMLButtonElement>("search-case");
+const searchRegexButton = byId<HTMLButtonElement>("search-regex");
+const searchScopeSelect = byId<HTMLSelectElement>("search-scope");
 const searchScopeWarning = byId<HTMLElement>("search-scope-warning");
 const searchCount = byId<HTMLElement>("search-count");
 const previousMatchButton = byId<HTMLButtonElement>("previous-match");
 const nextMatchButton = byId<HTMLButtonElement>("next-match");
 const clearSearchButton = byId<HTMLButtonElement>("clear-search");
+const diffClipboardButton = byId<HTMLButtonElement>("diff-clipboard");
+const toggleInspectorButton = byId<HTMLButtonElement>("toggle-inspector");
 const expandAllButton = byId<HTMLButtonElement>("expand-all");
 const collapseAllButton = byId<HTMLButtonElement>("collapse-all");
 const expandDepthSelect = byId<HTMLSelectElement>("expand-depth");
 const sortKeysButton = byId<HTMLButtonElement>("sort-keys");
 const emptySearch = byId<HTMLElement>("empty-search");
 const recoveryWarning = byId<HTMLElement>("recovery-warning");
+const diffBar = byId<HTMLElement>("diff-bar");
+const diffAddedCount = byId<HTMLElement>("diff-added-count");
+const diffRemovedCount = byId<HTMLElement>("diff-removed-count");
+const diffChangedCount = byId<HTMLElement>("diff-changed-count");
+const diffUnchangedCount = byId<HTMLElement>("diff-unchanged-count");
+const diffChangesOnlyInput = byId<HTMLInputElement>("diff-changes-only");
 const treeOperationStatus = byId<HTMLElement>("tree-operation-status");
 const jsonlBar = byId<HTMLElement>("jsonl-bar");
 const previousJsonlButton = byId<HTMLButtonElement>("previous-jsonl");
 const nextJsonlButton = byId<HTMLButtonElement>("next-jsonl");
+const jsonlDiffPrevButton = byId<HTMLButtonElement>("jsonl-diff-prev");
 const jsonlLineInput = byId<HTMLInputElement>("jsonl-line");
 const jsonlTotal = byId<HTMLElement>("jsonl-total");
 const goJsonlButton = byId<HTMLButtonElement>("go-jsonl");
@@ -92,17 +141,31 @@ const syncCursorInput = byId<HTMLInputElement>("sync-cursor");
 const refreshSourceButton = byId<HTMLButtonElement>("refresh-source");
 const sourceStatus = byId<HTMLElement>("source-status");
 const searchDecodedButton = byId<HTMLButtonElement>("search-decoded");
+const pinnedBar = byId<HTMLElement>("pinned-bar");
+const pinnedChips = byId<HTMLElement>("pinned-chips");
+const pinnedClearButton = byId<HTMLButtonElement>("pinned-clear");
 const breadcrumbBar = byId<HTMLElement>("breadcrumb-bar");
 const breadcrumbSegments = byId<HTMLElement>("breadcrumb-segments");
 const breadcrumbCopyJsonPath = byId<HTMLButtonElement>("breadcrumb-copy-jsonpath");
 const breadcrumbCopyJq = byId<HTMLButtonElement>("breadcrumb-copy-jq");
+const inspectorDrawer = byId<HTMLElement>("inspector-drawer");
+const inspectorPath = byId<HTMLElement>("inspector-path");
+const inspectorMeta = byId<HTMLElement>("inspector-meta");
+const inspectorWrapButton = byId<HTMLButtonElement>("inspector-wrap");
+const inspectorCopyButton = byId<HTMLButtonElement>("inspector-copy");
+const inspectorCloseButton = byId<HTMLButtonElement>("inspector-close");
+const inspectorContent = byId<HTMLElement>("inspector-content");
 const tableView = byId<HTMLElement>("table-view");
 const tableTitle = byId<HTMLElement>("table-title");
 const tableFilterInput = byId<HTMLInputElement>("table-filter");
 const tableCount = byId<HTMLElement>("table-count");
+const tableFlattenButton = byId<HTMLButtonElement>("table-flatten");
 const tableCopyCsvButton = byId<HTMLButtonElement>("table-copy-csv");
+const tableCopyTsvButton = byId<HTMLButtonElement>("table-copy-tsv");
+const tableCopyMdButton = byId<HTMLButtonElement>("table-copy-md");
 const tableExportCsvButton = byId<HTMLButtonElement>("table-export-csv");
 const tableCloseButton = byId<HTMLButtonElement>("table-close");
+const tableContainer = byId<HTMLElement>("table-container");
 const dataTable = byId<HTMLTableElement>("data-table");
 
 const treeSpacerTop = createSpacer();
@@ -114,6 +177,7 @@ let currentRoot: JsonTreeWebviewNode | undefined;
 let renderKey = -1;
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
 let jsonlFilterTimer: ReturnType<typeof setTimeout> | undefined;
+let tableFilterTimer: ReturnType<typeof setTimeout> | undefined;
 let searchActive = false;
 let searchApplying = false;
 let latestSearchRequest = 0;
@@ -132,14 +196,30 @@ let pendingReveal: number[] | undefined;
 let sourceRevealable = false;
 let persistScheduled = false;
 let searchDecoded = false;
+let searchCaseSensitive = false;
+let searchRegex = false;
+let searchScope: SearchScope = "all";
 let sortKeys = false;
 let decodeRequestedFor = -1;
 let stickyStatus = "";
+let currentPanelSource: PanelSourceDescriptor | undefined;
 
-const modelById = new Map<number, JsonTreeWebviewNode>();
-const parentById = new Map<number, number | undefined>();
-const edgeById = new Map<number, EdgeInfo | undefined>();
-const depthById = new Map<number, number>();
+let currentDiff: RenderDiffPayload | undefined;
+let diffChangesOnly = false;
+let diffBranchIds = new Set<number>();
+const diffRevealedIds = new Set<number>();
+
+let pinnedPaths: WebviewPathStep[][] = [];
+let inspectorOpen = false;
+let inspectorWrap = true;
+let lastInspectedNodeId: number | undefined;
+
+// Dense node-indexed arrays replace per-node Map hash tables for 500k-node trees.
+let modelById: Array<JsonTreeWebviewNode | undefined> = [];
+let parentById = new Int32Array(0);
+let edgeById: Array<EdgeInfo | undefined> = [];
+let depthById = new Int32Array(0);
+
 const decodingIds = new Set<number>();
 const expandedIds = new Set<number>();
 const searchExpandedIds = new Set<number>();
@@ -158,6 +238,66 @@ let currentTable: TableModel | undefined;
 let tableVisibleRowIndices: number[] = [];
 let tableSortColumn = -1;
 let tableSortAsc = true;
+let tableFlatten = false;
+let tableRenderedStart = -1;
+let tableRenderedEnd = -1;
+
+function getModel(id: number): JsonTreeWebviewNode | undefined {
+  return id >= 0 && id < modelById.length ? modelById[id] : undefined;
+}
+
+function getParentId(id: number): number | undefined {
+  if (id < 0 || id >= parentById.length) return undefined;
+  const parent = parentById[id];
+  return parent >= 0 ? parent : undefined;
+}
+
+function getEdge(id: number): EdgeInfo | undefined {
+  return id >= 0 && id < edgeById.length ? edgeById[id] : undefined;
+}
+
+function getDepth(id: number): number {
+  return id >= 0 && id < depthById.length ? depthById[id] : 0;
+}
+
+function ensureNodeIndexCapacity(minCapacity: number): void {
+  if (minCapacity <= parentById.length) {
+    if (modelById.length < minCapacity) modelById.length = minCapacity;
+    if (edgeById.length < minCapacity) edgeById.length = minCapacity;
+    return;
+  }
+  let nextCap = Math.max(64, parentById.length);
+  while (nextCap < minCapacity) nextCap *= 2;
+
+  const nextParents = new Int32Array(nextCap);
+  nextParents.fill(-1);
+  nextParents.set(parentById);
+  parentById = nextParents;
+
+  const nextDepths = new Int32Array(nextCap);
+  nextDepths.set(depthById);
+  depthById = nextDepths;
+
+  modelById.length = minCapacity;
+  edgeById.length = minCapacity;
+}
+
+function findMaxNodeId(root: JsonTreeWebviewNode): number {
+  let maxId = root.id;
+  const stack: JsonTreeWebviewNode[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (node.id > maxId) maxId = node.id;
+    if (node.decoded !== undefined) stack.push(node.decoded.root);
+    const children = node.children;
+    if (children !== undefined) {
+      for (let index = 0; index < children.length; index += 1) {
+        stack.push(children[index].value);
+      }
+    }
+  }
+  return maxId;
+}
 
 function createSpacer(): HTMLDivElement {
   const spacer = document.createElement("div");
@@ -194,6 +334,9 @@ window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) =
       return;
     case "tableData":
       openTableView(message.table);
+      return;
+    case "nodeInspection":
+      applyNodeInspection(message);
       return;
     case "render":
       render(message);
@@ -235,10 +378,12 @@ function isExpandedId(id: number): boolean {
 }
 
 function indexModelTree(root: JsonTreeWebviewNode): void {
-  modelById.clear();
-  parentById.clear();
-  edgeById.clear();
-  depthById.clear();
+  const maxId = findMaxNodeId(root);
+  modelById = new Array<JsonTreeWebviewNode | undefined>(maxId + 1);
+  edgeById = new Array<EdgeInfo | undefined>(maxId + 1);
+  parentById = new Int32Array(maxId + 1);
+  parentById.fill(-1);
+  depthById = new Int32Array(maxId + 1);
   sortedChildrenCache = new WeakMap<JsonTreeWebviewNode, JsonTreeWebviewChild[]>();
   indexSubtree(root, undefined, { label: "$", hasKey: false, hasRawKey: false }, 1);
 }
@@ -249,6 +394,8 @@ function indexSubtree(
   rootEdge: EdgeInfo | undefined,
   rootDepth: number,
 ): void {
+  const maxId = findMaxNodeId(root);
+  ensureNodeIndexCapacity(maxId + 1);
   const pending: Array<{
     model: JsonTreeWebviewNode;
     parentId: number | undefined;
@@ -258,15 +405,17 @@ function indexSubtree(
 
   while (pending.length > 0) {
     const { model, parentId, edge, depth } = pending.pop()!;
-    modelById.set(model.id, model);
-    parentById.set(model.id, parentId);
-    edgeById.set(model.id, edge);
-    depthById.set(model.id, depth);
+    const id = model.id;
+    if (id >= parentById.length) ensureNodeIndexCapacity(id + 1);
+    modelById[id] = model;
+    parentById[id] = parentId ?? -1;
+    edgeById[id] = edge;
+    depthById[id] = depth;
 
     if (model.decoded !== undefined) {
       pending.push({
         model: model.decoded.root,
-        parentId: model.id,
+        parentId: id,
         edge: {
           label: decodedRowLabel(model.decoded),
           hasKey: false,
@@ -281,7 +430,7 @@ function indexSubtree(
       const child = children[index];
       pending.push({
         model: child.value,
-        parentId: model.id,
+        parentId: id,
         edge: {
           label: String(child.key),
           hasKey: true,
@@ -314,6 +463,49 @@ function getOrderedChildren(model: JsonTreeWebviewNode): JsonTreeWebviewChild[] 
   return sorted;
 }
 
+function computeDiffBranchIds(diff: RenderDiffPayload | undefined): Set<number> {
+  const branches = new Set<number>();
+  if (!diff) return branches;
+  for (const rawId of Object.keys(diff.annotations)) {
+    const id = Number(rawId);
+    if (!Number.isSafeInteger(id)) continue;
+    let current: number | undefined = id;
+    while (current !== undefined && !branches.has(current)) {
+      branches.add(current);
+      current = getParentId(current);
+    }
+  }
+  return branches;
+}
+
+function applyDiffState(diff: RenderDiffPayload | undefined): void {
+  currentDiff = diff;
+  diffRevealedIds.clear();
+  diffBranchIds = computeDiffBranchIds(diff);
+  if (!diffBar) return;
+  diffBar.classList.toggle("hidden", diff === undefined);
+  if (diff === undefined) {
+    diffChangesOnly = false;
+    if (diffChangesOnlyInput) diffChangesOnlyInput.checked = false;
+    return;
+  }
+  if (diffAddedCount) {
+    diffAddedCount.textContent = `+${diff.summary.added.toLocaleString()}`;
+    diffAddedCount.title = t("{0} added", diff.summary.added.toLocaleString());
+  }
+  if (diffRemovedCount) {
+    diffRemovedCount.textContent = `-${diff.summary.removed.toLocaleString()}`;
+    diffRemovedCount.title = t("{0} removed", diff.summary.removed.toLocaleString());
+  }
+  if (diffChangedCount) {
+    diffChangedCount.textContent = `~${diff.summary.changed.toLocaleString()}`;
+    diffChangedCount.title = t("{0} changed", diff.summary.changed.toLocaleString());
+  }
+  if (diffUnchangedCount) {
+    diffUnchangedCount.textContent = t("{0} unchanged", diff.summary.unchanged.toLocaleString());
+  }
+}
+
 function render(message: RenderMessage): void {
   const snapshot = message.preserveView && currentRoot !== undefined ? captureViewByStructure() : undefined;
   activeTreeOperation += 1;
@@ -327,6 +519,7 @@ function render(message: RenderMessage): void {
   activeMatchNodeId = undefined;
   cursorSyncedNodeId = undefined;
   pendingReveal = undefined;
+  lastInspectedNodeId = undefined;
   stickyStatus = "";
   decodingIds.clear();
   searchExactIds = new Set<number>();
@@ -334,6 +527,8 @@ function render(message: RenderMessage): void {
   searchExpandedIds.clear();
   searchRevealedIds.clear();
   searchCount.textContent = "";
+  searchCount.title = "";
+  searchCount.classList.remove("search-error");
   previousMatchButton.disabled = true;
   nextMatchButton.disabled = true;
   emptySearch.classList.add("hidden");
@@ -352,10 +547,12 @@ function render(message: RenderMessage): void {
   const saved = renderKey === -1 ? loadViewState(message.renderKey) : undefined;
   renderKey = message.renderKey;
   currentRoot = message.root;
+  if (message.panelSource !== undefined) currentPanelSource = message.panelSource;
   expandAllAllowed = message.canExpandAll;
   expandAllLimitValue = message.expandAllLimit;
   expandedIds.clear();
   indexModelTree(currentRoot);
+  applyDiffState(message.diff);
 
   byId("title").textContent = message.title;
   byId("path").textContent = message.pathLabel;
@@ -374,7 +571,13 @@ function render(message: RenderMessage): void {
     : t("Expand all is unavailable because this tree exceeds {0} nodes", message.expandAllLimit.toLocaleString());
 
   if (saved?.searchDecoded !== undefined) setSearchDecoded(saved.searchDecoded);
+  if (saved?.searchCaseSensitive !== undefined) setSearchCaseSensitive(saved.searchCaseSensitive);
+  if (saved?.searchRegex !== undefined) setSearchRegex(saved.searchRegex);
+  if (saved?.searchScope !== undefined) setSearchScope(saved.searchScope);
   if (saved?.sortKeys !== undefined) setSortKeys(saved.sortKeys, false);
+  if (Array.isArray(saved?.pinnedPaths)) pinnedPaths = saved.pinnedPaths;
+  if (saved?.inspectorWrap !== undefined) setInspectorWrap(saved.inspectorWrap);
+  if (saved?.inspectorOpen !== undefined) setInspectorOpen(saved.inspectorOpen, false);
 
   const restore = snapshot !== undefined
     ? { query: searchInput.value, expanded: resolveStructuralPaths(snapshot.expandedPaths), scrollTop: snapshot.scrollTop }
@@ -386,7 +589,7 @@ function render(message: RenderMessage): void {
   if (restore) {
     searchInput.value = restore.query;
     for (const id of restore.expanded) {
-      const model = modelById.get(id);
+      const model = getModel(id);
       if (model !== undefined && isExpandableModel(model)) expandedIds.add(id);
     }
     rebuildVisibleRows();
@@ -401,6 +604,16 @@ function render(message: RenderMessage): void {
   } else if (message.autoExpand && expandAllAllowed) {
     rebuildVisibleRows();
     runTreeOperation(true);
+  } else if (currentDiff !== undefined && diffBranchIds.size > 0) {
+    expandedIds.add(currentRoot.id);
+    for (const id of diffBranchIds) {
+      if (currentDiff.annotations[id] === undefined) {
+        const model = getModel(id);
+        if (model !== undefined && isExpandableModel(model)) expandedIds.add(id);
+      }
+    }
+    rebuildVisibleRows();
+    updateActionButtons();
   } else if (expandAllAllowed) {
     expandedIds.add(currentRoot.id);
     rebuildVisibleRows();
@@ -409,6 +622,10 @@ function render(message: RenderMessage): void {
     rebuildVisibleRows();
     updateActionButtons();
   }
+
+  renderPinnedBar();
+  if (inspectorOpen) updateInspector(true);
+  if (currentPanelSource !== undefined || pinnedPaths.length > 0) schedulePersist();
 }
 
 searchInput.addEventListener("input", () => {
@@ -431,6 +648,91 @@ searchInput.addEventListener("keydown", (event: KeyboardEvent) => {
 previousMatchButton.addEventListener("click", () => selectRelativeMatch(-1));
 nextMatchButton.addEventListener("click", () => selectRelativeMatch(1));
 clearSearchButton.addEventListener("click", clearSearch);
+
+searchCaseButton?.addEventListener("click", () => {
+  setSearchCaseSensitive(!searchCaseSensitive);
+  schedulePersist();
+  if (searchInput.value.trim()) runSearch();
+});
+searchRegexButton?.addEventListener("click", () => {
+  setSearchRegex(!searchRegex);
+  schedulePersist();
+  if (searchInput.value.trim()) runSearch();
+});
+searchScopeSelect?.addEventListener("change", () => {
+  const val = searchScopeSelect.value;
+  if (val === "all" || val === "keys" || val === "values") {
+    setSearchScope(val);
+    schedulePersist();
+    if (searchInput.value.trim()) runSearch();
+  }
+});
+
+diffClipboardButton?.addEventListener("click", () =>
+  vscode.postMessage({ type: "diffWithClipboard" }));
+jsonlDiffPrevButton?.addEventListener("click", () =>
+  vscode.postMessage({ type: "diffJsonlPrevious" }));
+diffChangesOnlyInput?.addEventListener("change", () => {
+  diffChangesOnly = diffChangesOnlyInput.checked;
+  diffRevealedIds.clear();
+  if (diffChangesOnly && currentDiff) {
+    const expansion = activeExpansionSet();
+    for (const id of diffBranchIds) {
+      if (currentDiff.annotations[id] === undefined) {
+        const model = getModel(id);
+        if (model && isExpandableModel(model)) expansion.add(id);
+      }
+    }
+  }
+  rebuildVisibleRows();
+});
+
+toggleInspectorButton?.addEventListener("click", () => {
+  setInspectorOpen(!inspectorOpen, true);
+  schedulePersist();
+});
+inspectorCloseButton?.addEventListener("click", () => {
+  setInspectorOpen(false, false);
+  schedulePersist();
+});
+inspectorWrapButton?.addEventListener("click", () => {
+  setInspectorWrap(!inspectorWrap);
+  schedulePersist();
+});
+inspectorCopyButton?.addEventListener("click", () => {
+  if (focusedNodeId === undefined) return;
+  const model = getModel(focusedNodeId);
+  if (model) {
+    postNodeAction(model.type === "string" ? "copyDecodedString" : "copyValue", focusedNodeId);
+  }
+});
+
+pinnedClearButton?.addEventListener("click", () => {
+  pinnedPaths = [];
+  renderPinnedBar();
+  schedulePersist();
+});
+pinnedChips?.addEventListener("click", (event: Event) => {
+  const removeBtn = findClosest(event.target, "pinned-chip-remove");
+  if (removeBtn) {
+    const idx = Number(removeBtn.getAttribute("data-pin-index"));
+    if (Number.isInteger(idx) && idx >= 0 && idx < pinnedPaths.length) {
+      pinnedPaths.splice(idx, 1);
+      renderPinnedBar();
+      schedulePersist();
+    }
+    return;
+  }
+  const chip = findClosest(event.target, "pinned-chip");
+  if (!chip) return;
+  const idx = Number(chip.getAttribute("data-pin-index"));
+  if (!Number.isInteger(idx) || idx < 0 || idx >= pinnedPaths.length) return;
+  const resolvedId = resolveSingleStructuralPath(pinnedPaths[idx]);
+  if (resolvedId !== undefined) {
+    const ids = buildAncestry(resolvedId);
+    if (ids.length > 0) revealNode(ids, true);
+  }
+});
 
 expandAllButton.addEventListener("click", () => runTreeOperation(true));
 collapseAllButton.addEventListener("click", () => runTreeOperation(false));
@@ -509,9 +811,45 @@ breadcrumbSegments?.addEventListener("click", (event: Event) => {
   focusNodeById(nodeId);
 });
 
-tableFilterInput?.addEventListener("input", () => renderTableRows());
+tableFilterInput?.addEventListener("input", () => {
+  clearTimeout(tableFilterTimer);
+  tableFilterTimer = setTimeout(() => {
+    if (tableContainer) tableContainer.scrollTop = 0;
+    renderTableRows();
+  }, TABLE_FILTER_DEBOUNCE_MS);
+});
+tableFilterInput?.addEventListener("keydown", (event: KeyboardEvent) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    clearTimeout(tableFilterTimer);
+    if (tableContainer) tableContainer.scrollTop = 0;
+    renderTableRows();
+  } else if (event.key === "Escape" && tableFilterInput.value.length > 0) {
+    event.preventDefault();
+    event.stopPropagation();
+    clearTimeout(tableFilterTimer);
+    tableFilterInput.value = "";
+    if (tableContainer) tableContainer.scrollTop = 0;
+    renderTableRows();
+  }
+});
+tableContainer?.addEventListener("scroll", () => {
+  if (tableVisibleRowIndices.length > TABLE_VIRTUALIZE_THRESHOLD) {
+    renderTableViewport(false);
+  }
+});
+tableFlattenButton?.addEventListener("click", () => {
+  tableFlatten = !tableFlatten;
+  tableFlattenButton.classList.toggle("active", tableFlatten);
+  tableFlattenButton.setAttribute("aria-pressed", String(tableFlatten));
+  vscode.postMessage({ type: "reopenTable", flatten: tableFlatten });
+});
 tableCopyCsvButton?.addEventListener("click", () =>
   vscode.postMessage({ type: "exportTable", mode: "copy", rowIndices: tableVisibleRowIndices }));
+tableCopyTsvButton?.addEventListener("click", () =>
+  vscode.postMessage({ type: "exportTable", mode: "copy", format: "tsv", rowIndices: tableVisibleRowIndices }));
+tableCopyMdButton?.addEventListener("click", () =>
+  vscode.postMessage({ type: "exportTable", mode: "copy", format: "markdown", rowIndices: tableVisibleRowIndices }));
 tableExportCsvButton?.addEventListener("click", () =>
   vscode.postMessage({ type: "exportTable", mode: "open", rowIndices: tableVisibleRowIndices }));
 tableCloseButton?.addEventListener("click", () => closeTableView(true));
@@ -542,9 +880,9 @@ dataTable?.addEventListener("click", (event: Event) => {
     closeTableView(true);
     vscode.postMessage({ type: "goToJsonlLine", lineNumber: row.targetLineNumber + 1 });
   } else if (row.targetNodeId !== undefined) {
-    closeTableView(true);
+    closeTableView(false);
     const ids = buildAncestry(row.targetNodeId);
-    if (ids.length > 0) revealNode(ids);
+    if (ids.length > 0) revealNode(ids, true);
   }
 });
 
@@ -581,6 +919,11 @@ tree.addEventListener("click", (event: Event) => {
   const nodeId = nodeEl ? Number(nodeEl.getAttribute("data-node-id")) : Number.NaN;
   if (!Number.isSafeInteger(nodeId)) return;
   setFocusedNode(nodeId, false);
+  // Preserve text selection inside .value when the user dragged across text.
+  if (!findClosest(event.target, "toggle")) {
+    const selectedText = window.getSelection?.()?.toString() ?? "";
+    if (selectedText.length > 0) return;
+  }
   toggleNodeManually(nodeId);
 });
 
@@ -658,6 +1001,7 @@ function rebuildVisibleRows(): void {
   }
 
   const expansion = activeExpansionSet();
+  const filterDiff = currentDiff !== undefined && diffChangesOnly;
   const stack: Array<{
     id: number;
     level: number;
@@ -669,7 +1013,7 @@ function rebuildVisibleRows(): void {
     level: 1,
     label: "$",
     model: currentRoot,
-    edge: edgeById.get(currentRoot.id),
+    edge: getEdge(currentRoot.id),
   }];
 
   while (stack.length > 0) {
@@ -680,6 +1024,13 @@ function rebuildVisibleRows(): void {
         searchBranchIds.has(entry.id) ||
         searchRevealedIds.has(entry.id);
       if (!visibleInSearch) continue;
+    }
+    if (filterDiff) {
+      const visibleInDiff =
+        entry.id === currentRoot.id ||
+        diffBranchIds.has(entry.id) ||
+        diffRevealedIds.has(entry.id);
+      if (!visibleInDiff) continue;
     }
 
     rowIndexById.set(entry.id, visibleRows.length);
@@ -692,27 +1043,32 @@ function rebuildVisibleRows(): void {
       if (searchActive && searchRevealedIds.has(entry.id)) {
         searchRevealedIds.add(decodedRoot.id);
       }
+      if (filterDiff && diffRevealedIds.has(entry.id)) {
+        diffRevealedIds.add(decodedRoot.id);
+      }
       stack.push({
         id: decodedRoot.id,
         level: entry.level + 1,
         label: decodedRowLabel(entry.model.decoded),
         model: decodedRoot,
-        edge: edgeById.get(decodedRoot.id),
+        edge: getEdge(decodedRoot.id),
       });
       continue;
     }
 
     const children = getOrderedChildren(entry.model);
     const parentRevealed = searchActive && searchRevealedIds.has(entry.id);
+    const parentDiffRevealed = filterDiff && diffRevealedIds.has(entry.id);
     for (let index = children.length - 1; index >= 0; index -= 1) {
       const child = children[index];
       if (parentRevealed) searchRevealedIds.add(child.value.id);
+      if (parentDiffRevealed) diffRevealedIds.add(child.value.id);
       stack.push({
         id: child.value.id,
         level: entry.level + 1,
         label: String(child.key),
         model: child.value,
-        edge: edgeById.get(child.value.id),
+        edge: getEdge(child.value.id),
       });
     }
   }
@@ -742,7 +1098,9 @@ function renderVirtualWindow(force = false): void {
   const start = Math.min(total, Math.max(0, firstVisible - OVERSCAN_ROWS));
   const end = Math.min(total, firstVisible + visibleCount + OVERSCAN_ROWS);
 
-  if (!force && start === renderedStart && end === renderedEnd) return;
+  const prevStart = renderedStart;
+  const prevEnd = renderedEnd;
+  if (!force && start === prevStart && end === prevEnd) return;
   const restoreFocus = wasTreeFocused();
   renderedStart = start;
   renderedEnd = end;
@@ -750,15 +1108,65 @@ function renderVirtualWindow(force = false): void {
   treeSpacerTop.style.height = `${start * ROW_HEIGHT}px`;
   treeSpacerBottom.style.height = `${Math.max(0, total - end) * ROW_HEIGHT}px`;
 
-  renderedRowElements.clear();
-  const fragment = document.createDocumentFragment();
-  for (let index = start; index < end; index += 1) {
-    const row = visibleRows[index];
-    const el = createRowElement(row);
-    renderedRowElements.set(row.id, el);
-    fragment.appendChild(el);
+  // Recycle surviving DOM row subtrees in place when scrolling across overlapping windows.
+  if (
+    !force &&
+    prevStart >= 0 &&
+    start < prevEnd &&
+    end > prevStart &&
+    treeRowsContainer.children.length === prevEnd - prevStart
+  ) {
+    const dropTop = Math.max(0, start - prevStart);
+    for (let i = 0; i < dropTop; i += 1) {
+      const child = treeRowsContainer.children[0] as HTMLElement | undefined;
+      if (!child) break;
+      const idAttr = child.getAttribute("data-node-id");
+      if (idAttr !== null) renderedRowElements.delete(Number(idAttr));
+      treeRowsContainer.removeChild(child);
+    }
+
+    const dropBottom = Math.max(0, prevEnd - end);
+    for (let i = 0; i < dropBottom; i += 1) {
+      const child = treeRowsContainer.children[treeRowsContainer.children.length - 1] as HTMLElement | undefined;
+      if (!child) break;
+      const idAttr = child.getAttribute("data-node-id");
+      if (idAttr !== null) renderedRowElements.delete(Number(idAttr));
+      treeRowsContainer.removeChild(child);
+    }
+
+    if (start < prevStart) {
+      const topFragment = document.createDocumentFragment();
+      for (let index = start; index < prevStart; index += 1) {
+        const row = visibleRows[index];
+        const el = renderedRowElements.get(row.id) ?? createRowElement(row);
+        renderedRowElements.set(row.id, el);
+        topFragment.appendChild(el);
+      }
+      treeRowsContainer.insertBefore(topFragment, treeRowsContainer.firstChild);
+    }
+
+    if (end > prevEnd) {
+      const bottomFragment = document.createDocumentFragment();
+      for (let index = prevEnd; index < end; index += 1) {
+        const row = visibleRows[index];
+        const el = renderedRowElements.get(row.id) ?? createRowElement(row);
+        renderedRowElements.set(row.id, el);
+        bottomFragment.appendChild(el);
+      }
+      treeRowsContainer.appendChild(bottomFragment);
+    }
+  } else {
+    const reusable = force ? undefined : new Map(renderedRowElements);
+    renderedRowElements.clear();
+    const fragment = document.createDocumentFragment();
+    for (let index = start; index < end; index += 1) {
+      const row = visibleRows[index];
+      const el = reusable?.get(row.id) ?? createRowElement(row);
+      renderedRowElements.set(row.id, el);
+      fragment.appendChild(el);
+    }
+    treeRowsContainer.replaceChildren(fragment);
   }
-  treeRowsContainer.replaceChildren(fragment);
 
   if (restoreFocus && focusedNodeId !== undefined) {
     const target = renderedRowElements.get(focusedNodeId);
@@ -809,8 +1217,12 @@ function createRowElement(entry: VisibleRow): HTMLDivElement {
     node.setAttribute("aria-expanded", String(expanded));
   }
 
+  const diffAnnotation = currentDiff?.annotations[id];
   const row = document.createElement("div");
   row.className = "row";
+  if (diffAnnotation !== undefined) {
+    row.classList.add("diff-row", `diff-${diffAnnotation.status}`);
+  }
   if (searchActive && searchExactIds.has(id)) row.classList.add("search-match");
   if (searchActive && activeMatchNodeId === id) row.classList.add("active-match");
   if (cursorSyncedNodeId === id) row.classList.add("cursor-match");
@@ -834,6 +1246,22 @@ function createRowElement(entry: VisibleRow): HTMLDivElement {
   toggle.title = decodable ? decodableToggleTitle(model.decodableKind) : "";
   row.appendChild(toggle);
 
+  if (diffAnnotation !== undefined) {
+    const badge = document.createElement("span");
+    badge.className = `diff-status-badge diff-${diffAnnotation.status}`;
+    badge.textContent = diffAnnotation.status === "added"
+      ? "+"
+      : diffAnnotation.status === "removed"
+        ? "-"
+        : "~";
+    badge.title = diffAnnotation.status === "added"
+      ? t("Added")
+      : diffAnnotation.status === "removed"
+        ? t("Removed")
+        : t("Changed");
+    row.appendChild(badge);
+  }
+
   const keySpan = document.createElement("span");
   keySpan.className = edge?.decoded ? "key decoded-key" : "key";
   keySpan.textContent = label;
@@ -847,7 +1275,7 @@ function createRowElement(entry: VisibleRow): HTMLDivElement {
   separator.textContent = ":";
   row.appendChild(separator);
 
-  appendValue(row, model, label, expanded);
+  appendValue(row, model, label, expanded, diffAnnotation);
 
   if (edge?.keyTruncated || edge?.rawKeyTruncated || model.rawTruncated || model.valueTruncated) {
     const truncatedBadge = document.createElement("span");
@@ -891,7 +1319,7 @@ function createRowActionButton(text: string, action: string, title: string): HTM
 }
 
 function handleQuickRowAction(action: string, nodeId: number): void {
-  const model = modelById.get(nodeId);
+  const model = getModel(nodeId);
   if (!model) return;
   if (action === "expandDecoded") {
     requestDecode(nodeId);
@@ -921,6 +1349,48 @@ function runSearch(): void {
     resetSearchView();
     return;
   }
+  const options: SearchOptionsCompat = {
+    caseSensitive: searchCaseSensitive,
+    regex: searchRegex,
+    scope: searchScope,
+  };
+  const state = createSearchState(currentRoot as never, query, 5_000, options);
+  if (searchRegex && state.invalidRegex === undefined) {
+    try {
+      new RegExp(query, searchCaseSensitive ? "" : "i");
+    } catch (error) {
+      state.invalidRegex = error instanceof Error ? error.message : String(error);
+      state.done = true;
+      state.matches = [];
+      state.stack.length = 0;
+    }
+  }
+
+  if (state.invalidRegex !== undefined) {
+    const wasActive = searchActive;
+    latestSearchRequest += 1;
+    searchActive = false;
+    searchApplying = false;
+    matchIds = [];
+    activeMatchIndex = -1;
+    activeMatchNodeId = undefined;
+    searchExactIds = new Set<number>();
+    searchBranchIds = new Set<number>();
+    searchExpandedIds.clear();
+    searchRevealedIds.clear();
+    searchCount.textContent = t("Invalid regex");
+    searchCount.title = state.invalidRegex;
+    searchCount.classList.add("search-error");
+    previousMatchButton.disabled = true;
+    nextMatchButton.disabled = true;
+    emptySearch.classList.add("hidden");
+    if (wasActive) rebuildVisibleRows();
+    updateActionButtons();
+    return;
+  }
+
+  searchCount.title = "";
+  searchCount.classList.remove("search-error");
   searchActive = true;
   searchApplying = true;
   activeTreeOperation += 1;
@@ -936,7 +1406,6 @@ function runSearch(): void {
     stickyStatus = t("Decoding embedded JSON for search…");
     vscode.postMessage({ type: "decodeAllForSearch", renderKey });
   }
-  const state = createJsonTreeSearchState(currentRoot as never, query);
   const processChunk = (): void => {
     if (requestId !== latestSearchRequest || !searchActive) return;
     if (advanceJsonTreeSearch(state, 2_000)) {
@@ -948,8 +1417,21 @@ function runSearch(): void {
   processChunk();
 }
 
-function applySearchResults(result: JsonTreeSearchState, requestId: number): void {
+function applySearchResults(result: SearchStateCompat, requestId: number): void {
   if (requestId !== latestSearchRequest || !searchActive || !currentRoot) return;
+  if (result.invalidRegex !== undefined) {
+    searchActive = false;
+    searchApplying = false;
+    searchCount.textContent = t("Invalid regex");
+    searchCount.title = result.invalidRegex;
+    searchCount.classList.add("search-error");
+    previousMatchButton.disabled = true;
+    nextMatchButton.disabled = true;
+    emptySearch.classList.add("hidden");
+    rebuildVisibleRows();
+    updateActionButtons();
+    return;
+  }
   searchExactIds = new Set(result.matches);
   searchBranchIds = new Set(result.expandIds);
   searchExpandedIds.clear();
@@ -1009,6 +1491,8 @@ function resetSearchView(): void {
   searchExpandedIds.clear();
   searchRevealedIds.clear();
   searchCount.textContent = "";
+  searchCount.title = "";
+  searchCount.classList.remove("search-error");
   previousMatchButton.disabled = true;
   nextMatchButton.disabled = true;
   clearSearchButton.disabled = true;
@@ -1102,7 +1586,7 @@ function expandToDepth(targetDepth: number): void {
 }
 
 function expandSubtree(nodeId: number): void {
-  const root = modelById.get(nodeId);
+  const root = getModel(nodeId);
   if (!root || !isExpandableModel(root)) return;
   const expansion = activeExpansionSet();
   const pending: JsonTreeWebviewNode[] = [root];
@@ -1113,6 +1597,7 @@ function expandSubtree(nodeId: number): void {
     if (!isExpandableModel(model)) continue;
     expansion.add(model.id);
     if (searchActive) searchRevealedIds.add(model.id);
+    if (currentDiff && diffChangesOnly) diffRevealedIds.add(model.id);
     if (model.decoded !== undefined) {
       pending.push(model.decoded.root);
     } else {
@@ -1124,7 +1609,7 @@ function expandSubtree(nodeId: number): void {
 }
 
 function collapseSubtree(nodeId: number): void {
-  const root = modelById.get(nodeId);
+  const root = getModel(nodeId);
   if (!root) return;
   const expansion = activeExpansionSet();
   const pending: JsonTreeWebviewNode[] = [root];
@@ -1142,9 +1627,9 @@ function collapseSubtree(nodeId: number): void {
 }
 
 function collapseSiblings(nodeId: number): void {
-  const parentId = parentById.get(nodeId);
+  const parentId = getParentId(nodeId);
   if (parentId === undefined) return;
-  const parent = modelById.get(parentId);
+  const parent = getModel(parentId);
   if (!parent) return;
   const expansion = activeExpansionSet();
   for (const child of parent.children ?? []) {
@@ -1156,7 +1641,7 @@ function collapseSiblings(nodeId: number): void {
 
 function toggleNodeManually(nodeId: number): void {
   if (treeOperationRunning || searchApplying) return;
-  const model = modelById.get(nodeId);
+  const model = getModel(nodeId);
   if (!model) return;
   if (isDecodableModel(model)) {
     requestDecode(nodeId);
@@ -1169,6 +1654,7 @@ function toggleNodeManually(nodeId: number): void {
   } else {
     expansion.add(nodeId);
     if (searchActive) searchRevealedIds.add(nodeId);
+    if (currentDiff && diffChangesOnly) diffRevealedIds.add(nodeId);
   }
   if (!searchActive) schedulePersist();
   rebuildVisibleRows();
@@ -1179,6 +1665,25 @@ function setSearchDecoded(enabled: boolean): void {
   if (!searchDecodedButton) return;
   searchDecodedButton.classList.toggle("active", enabled);
   searchDecodedButton.setAttribute("aria-pressed", String(enabled));
+}
+
+function setSearchCaseSensitive(enabled: boolean): void {
+  searchCaseSensitive = enabled;
+  if (!searchCaseButton) return;
+  searchCaseButton.classList.toggle("active", enabled);
+  searchCaseButton.setAttribute("aria-pressed", String(enabled));
+}
+
+function setSearchRegex(enabled: boolean): void {
+  searchRegex = enabled;
+  if (!searchRegexButton) return;
+  searchRegexButton.classList.toggle("active", enabled);
+  searchRegexButton.setAttribute("aria-pressed", String(enabled));
+}
+
+function setSearchScope(scope: SearchScope): void {
+  searchScope = scope;
+  if (searchScopeSelect) searchScopeSelect.value = scope;
 }
 
 function setSortKeys(enabled: boolean, rerender: boolean): void {
@@ -1209,7 +1714,7 @@ function attachDecodedToNode(
   expand: boolean,
 ): void {
   decodingIds.delete(nodeId);
-  const model = modelById.get(nodeId);
+  const model = getModel(nodeId);
   if (!model || isExpandableModel(model)) return;
   model.decoded = decoded;
   delete model.decodable;
@@ -1223,8 +1728,11 @@ function attachDecodedToNode(
       hasRawKey: false,
       decoded: true,
     },
-    (depthById.get(model.id) ?? 1) + 1,
+    (getDepth(model.id) || 1) + 1,
   );
+  if (currentDiff !== undefined) {
+    diffBranchIds = computeDiffBranchIds(currentDiff);
+  }
   if (!expand) return;
   const expansion = activeExpansionSet();
   expansion.add(model.id);
@@ -1235,12 +1743,17 @@ function attachDecodedToNode(
   } else {
     schedulePersist();
   }
+  if (currentDiff && diffChangesOnly) {
+    diffRevealedIds.add(model.id);
+    diffRevealedIds.add(decoded.root.id);
+  }
   rebuildVisibleRows();
+  if (pinnedPaths.length > 0) renderPinnedBar();
 }
 
 function markNodeNotDecodable(nodeId: number, cancelled = false): void {
   decodingIds.delete(nodeId);
-  const model = modelById.get(nodeId);
+  const model = getModel(nodeId);
   if (!cancelled && model) {
     delete model.decodable;
     delete model.decodableKind;
@@ -1252,7 +1765,7 @@ function markNodeNotDecodable(nodeId: number, cancelled = false): void {
 function applyDecodedBatch(message: Extract<HostToWebviewMessage, { type: "decodedBatch" }>): void {
   if (message.renderKey !== renderKey || currentRoot === undefined) return;
   for (const item of message.items) {
-    const model = modelById.get(item.nodeId);
+    const model = getModel(item.nodeId);
     if (model === undefined || model.decoded !== undefined) continue;
     attachDecodedToNode(item.nodeId, item.decoded, false);
   }
@@ -1262,6 +1775,7 @@ function applyDecodedBatch(message: Extract<HostToWebviewMessage, { type: "decod
       ? t("Decoded 1 string for search")
       : t("Decoded {0} strings for search", message.decodedCount.toLocaleString());
   updateActionButtons();
+  if (pinnedPaths.length > 0) renderPinnedBar();
   if (searchInput.value.trim()) {
     runSearch();
   } else if (message.items.length > 0) {
@@ -1271,7 +1785,7 @@ function applyDecodedBatch(message: Extract<HostToWebviewMessage, { type: "decod
 
 /** Asks the Host to parse a string's embedded content; the reply attaches it inline. */
 function requestDecode(nodeId: number): void {
-  const model = modelById.get(nodeId);
+  const model = getModel(nodeId);
   if (!model || !isDecodableModel(model) || decodingIds.has(nodeId)) return;
   decodingIds.add(nodeId);
   const el = renderedRowElements.get(nodeId);
@@ -1298,10 +1812,14 @@ function applyJsonlState(state: JsonlViewState): void {
   if (jsonlFilterInput && state.filterQuery !== undefined && document.activeElement !== jsonlFilterInput) {
     jsonlFilterInput.value = state.filterQuery;
   }
+  if (currentPanelSource?.kind === "jsonl") {
+    currentPanelSource = { ...currentPanelSource, lineNumber: Math.max(0, state.lineNumber - 1) };
+  }
   jsonlStatus.textContent = state.status || "";
   const busy = state.busy === true;
   previousJsonlButton.disabled = busy;
   nextJsonlButton.disabled = busy;
+  if (jsonlDiffPrevButton) jsonlDiffPrevButton.disabled = busy;
   jsonlLineInput.disabled = busy;
   goJsonlButton.disabled = busy;
   if (jsonlFilterListButton) jsonlFilterListButton.disabled = busy;
@@ -1328,9 +1846,12 @@ function goToJsonlLine(): void {
 }
 
 function decodedRowLabel(decoded: NonNullable<JsonTreeWebviewNode["decoded"]>): string {
-  switch (decoded.kind) {
+  const kind = decoded.kind as string | undefined;
+  switch (kind) {
     case "jwt": return t("decoded JWT");
     case "url": return t("decoded URL");
+    case "url-json": return t("decoded JSON (URL)");
+    case "base64-gzip-json": return t("decoded JSON (Gzip Base64)");
     case "base64-json": return t("decoded JSON (Base64)");
     case "base64-protobuf": return t("decoded Protobuf (Base64)");
     case "base64-text": return t("decoded text (Base64)");
@@ -1376,7 +1897,13 @@ function describeValue(model: JsonTreeWebviewNode): string {
   return t(typeLabel(model.type)) + " " + (model.raw ?? "");
 }
 
-function appendValue(row: HTMLElement, model: JsonTreeWebviewNode, key: string, isExpanded: boolean): void {
+function appendValue(
+  row: HTMLElement,
+  model: JsonTreeWebviewNode,
+  key: string,
+  isExpanded: boolean,
+  diffAnnotation?: RenderDiffPayload["annotations"][number],
+): void {
   const span = document.createElement("span");
   if (model.type === "object" || model.type === "array") {
     span.className = "summary";
@@ -1393,6 +1920,17 @@ function appendValue(row: HTMLElement, model: JsonTreeWebviewNode, key: string, 
       }
     }
     return;
+  }
+
+  if (diffAnnotation?.status === "changed" && diffAnnotation.oldRaw !== undefined) {
+    const oldSpan = document.createElement("span");
+    oldSpan.className = "diff-old-value";
+    const displayOld = diffAnnotation.oldRaw.length > 80
+      ? `${diffAnnotation.oldRaw.slice(0, 79)}…`
+      : diffAnnotation.oldRaw;
+    oldSpan.textContent = `${displayOld} → `;
+    oldSpan.title = diffAnnotation.oldRaw;
+    row.appendChild(oldSpan);
   }
 
   span.className = "value " + model.type;
@@ -1616,21 +2154,355 @@ function isColorValue(value: string): boolean {
     /^(?:rgb|hsl)a?\([^()]{1,60}\)$/i.test(text);
 }
 
+// Value Inspector Drawer
+
+function setInspectorWrap(enabled: boolean): void {
+  inspectorWrap = enabled;
+  if (inspectorWrapButton) {
+    inspectorWrapButton.classList.toggle("active", enabled);
+    inspectorWrapButton.setAttribute("aria-pressed", String(enabled));
+  }
+  if (inspectorContent) {
+    inspectorContent.classList.toggle("wrap", enabled);
+  }
+}
+
+function setInspectorOpen(open: boolean, requestUpdate = true): void {
+  inspectorOpen = open;
+  if (toggleInspectorButton) {
+    toggleInspectorButton.classList.toggle("active", open);
+    toggleInspectorButton.setAttribute("aria-pressed", String(open));
+  }
+  if (!inspectorDrawer) return;
+  const inTable = tableView !== null && tableView !== undefined && !tableView.classList.contains("hidden");
+  inspectorDrawer.classList.toggle("hidden", !open || inTable);
+  if (open && requestUpdate) {
+    updateInspector(true);
+  }
+}
+
+function openInspectorForNode(nodeId: number): void {
+  setFocusedNode(nodeId, false);
+  setInspectorOpen(true, true);
+  schedulePersist();
+}
+
+function formatDisplayPathFromAncestry(ancestry: number[]): string {
+  if (ancestry.length === 0) return "$";
+  let out = "$";
+  for (let index = 1; index < ancestry.length; index += 1) {
+    const id = ancestry[index];
+    const edge = getEdge(id);
+    const parentId = getParentId(id);
+    const parent = parentId !== undefined ? getModel(parentId) : undefined;
+    if (edge?.decoded) {
+      out += "⟩";
+    } else if (parent?.type === "array") {
+      out += `[${edge?.label ?? "0"}]`;
+    } else {
+      const label = edge?.label ?? "";
+      out += /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(label) ? `.${label}` : `[${JSON.stringify(label)}]`;
+    }
+  }
+  return out;
+}
+
+function measureUtf8Bytes(text: string): number {
+  if (typeof TextEncoder !== "undefined") {
+    return new TextEncoder().encode(text).length;
+  }
+  return text.length;
+}
+
+function formatInspectorMeta(
+  nodeType: string,
+  charLength: number,
+  lineCount: number,
+  byteLength: number,
+  childCount?: number,
+): string {
+  const parts = [
+    t(typeLabel(nodeType as JsonTreeWebviewNode["type"])),
+    t("{0} chars", charLength.toLocaleString()),
+    lineCount === 1 ? t("1 line") : t("{0} lines", lineCount.toLocaleString()),
+    t("{0} B", byteLength.toLocaleString()),
+  ];
+  if (childCount !== undefined) {
+    parts.push(
+      nodeType === "array"
+        ? t("array, {0} items", childCount.toLocaleString())
+        : t("object, {0} keys", childCount.toLocaleString()),
+    );
+  }
+  return parts.join(" · ");
+}
+
+function updateInspector(forceRequest = false): void {
+  if (!inspectorOpen || !inspectorDrawer) return;
+  if (focusedNodeId === undefined || getModel(focusedNodeId) === undefined) {
+    if (inspectorPath) inspectorPath.textContent = "";
+    if (inspectorMeta) inspectorMeta.textContent = "";
+    if (inspectorContent) inspectorContent.textContent = "";
+    return;
+  }
+  const model = getModel(focusedNodeId)!;
+  const ancestry = buildAncestry(focusedNodeId);
+  const pathText = formatDisplayPathFromAncestry(ancestry);
+  let previewText: string;
+  if (model.type === "string") {
+    previewText = String(model.value ?? "");
+  } else if (model.type === "object" || model.type === "array") {
+    previewText = buildCollapsedPreview(model, getOrderedChildren(model));
+    if (previewText.length === 0) previewText = model.type === "array" ? "[]" : "{}";
+  } else {
+    previewText = model.raw ?? String(model.value);
+  }
+  const charLength = model.valueLength ?? model.rawLength ?? previewText.length;
+  const lineCount = previewText.length === 0 ? 1 : previewText.split("\n").length;
+  const byteLength = measureUtf8Bytes(previewText);
+  const childCount = model.children?.length;
+
+  if (inspectorPath) {
+    inspectorPath.textContent = pathText;
+    inspectorPath.title = pathText;
+  }
+  if (inspectorMeta) {
+    inspectorMeta.textContent = formatInspectorMeta(model.type, charLength, lineCount, byteLength, childCount);
+  }
+  if (inspectorContent) {
+    inspectorContent.textContent = previewText;
+  }
+
+  if (forceRequest || lastInspectedNodeId !== focusedNodeId) {
+    lastInspectedNodeId = focusedNodeId;
+    vscode.postMessage({ type: "inspectNode", nodeId: focusedNodeId });
+  }
+}
+
+function applyNodeInspection(message: NodeInspectionMessage): void {
+  if (!inspectorOpen || message.nodeId !== focusedNodeId) return;
+  if (inspectorPath) {
+    inspectorPath.textContent = message.path;
+    inspectorPath.title = message.path;
+  }
+  if (inspectorMeta) {
+    inspectorMeta.textContent = formatInspectorMeta(
+      message.nodeType,
+      message.charLength,
+      message.lineCount,
+      message.byteLength,
+      message.childCount,
+    );
+  }
+  if (inspectorContent) {
+    inspectorContent.textContent = message.fullValue;
+  }
+}
+
+// Pin / Watch Paths Bar
+
+function structuralPathKey(path: readonly WebviewPathStep[]): string {
+  return JSON.stringify(path);
+}
+
+function getStructuralPathForNode(nodeId: number): WebviewPathStep[] | undefined {
+  if (!currentRoot || nodeId === currentRoot.id || getModel(nodeId) === undefined) return undefined;
+  const ancestry = buildAncestry(nodeId);
+  if (ancestry.length < 2 || ancestry[0] !== currentRoot.id) return undefined;
+  const steps: WebviewPathStep[] = [];
+  for (let index = 1; index < ancestry.length; index += 1) {
+    const parentId = ancestry[index - 1];
+    const childId = ancestry[index];
+    const parent = getModel(parentId);
+    if (!parent) return undefined;
+    if (parent.decoded?.root.id === childId) {
+      steps.push("decoded");
+      continue;
+    }
+    const children = parent.children ?? [];
+    if (parent.type === "array") {
+      let foundIndex = -1;
+      for (let c = 0; c < children.length; c += 1) {
+        if (children[c].value.id === childId) {
+          foundIndex = c;
+          break;
+        }
+      }
+      if (foundIndex < 0) return undefined;
+      steps.push(foundIndex);
+    } else if (parent.type === "object") {
+      let targetKey: string | undefined;
+      let occurrence = 0;
+      for (let c = 0; c < children.length; c += 1) {
+        if (children[c].value.id === childId) {
+          targetKey = String(children[c].key);
+          break;
+        }
+      }
+      if (targetKey === undefined) return undefined;
+      for (let c = 0; c < children.length; c += 1) {
+        if (children[c].value.id === childId) break;
+        if (String(children[c].key) === targetKey) occurrence += 1;
+      }
+      steps.push({ key: targetKey, occurrence });
+    } else {
+      return undefined;
+    }
+  }
+  return steps;
+}
+
+function resolveSingleStructuralPath(path: readonly WebviewPathStep[]): number | undefined {
+  let model: JsonTreeWebviewNode | undefined = currentRoot;
+  for (const step of path) {
+    if (step === "decoded") {
+      model = model?.decoded?.root;
+    } else if (typeof step === "number") {
+      model = model?.children?.[step]?.value;
+    } else if (model?.type === "object" && model.children !== undefined) {
+      let seen = 0;
+      let found: JsonTreeWebviewNode | undefined;
+      for (const child of model.children) {
+        if (String(child.key) === step.key) {
+          if (seen === step.occurrence) {
+            found = child.value;
+            break;
+          }
+          seen += 1;
+        }
+      }
+      model = found;
+    } else {
+      model = undefined;
+    }
+    if (model === undefined) return undefined;
+  }
+  return model?.id;
+}
+
+function isNodePinned(nodeId: number): boolean {
+  const path = getStructuralPathForNode(nodeId);
+  if (!path) return false;
+  const key = structuralPathKey(path);
+  return pinnedPaths.some((existing) => structuralPathKey(existing) === key);
+}
+
+function togglePinNode(nodeId: number): void {
+  const path = getStructuralPathForNode(nodeId);
+  if (!path) return;
+  const key = structuralPathKey(path);
+  const existingIndex = pinnedPaths.findIndex((existing) => structuralPathKey(existing) === key);
+  if (existingIndex >= 0) {
+    pinnedPaths.splice(existingIndex, 1);
+  } else {
+    pinnedPaths.push(path);
+  }
+  renderPinnedBar();
+  schedulePersist();
+}
+
+function formatPinnedPathLabel(path: readonly WebviewPathStep[]): string {
+  const parts: string[] = [];
+  for (const step of path) {
+    if (step === "decoded") {
+      parts.push("⟩");
+    } else if (typeof step === "number") {
+      parts.push(`[${step}]`);
+    } else {
+      const suffix = step.occurrence > 0 ? `#${step.occurrence + 1}` : "";
+      const seg = `${step.key}${suffix}`;
+      if (parts.length === 0 || parts[parts.length - 1] === "⟩") {
+        parts.push(seg);
+      } else {
+        parts.push(`.${seg}`);
+      }
+    }
+  }
+  return parts.join("");
+}
+
+function formatPinnedShortValue(model: JsonTreeWebviewNode | undefined): string {
+  if (!model) return "—";
+  if (model.type === "object") return `{${(model.children ?? []).length}}`;
+  if (model.type === "array") return `[${(model.children ?? []).length}]`;
+  if (model.type === "string") {
+    const val = String(model.value ?? "");
+    return val.length > 28 ? `${val.slice(0, 27)}…` : val;
+  }
+  const raw = model.raw ?? String(model.value);
+  return raw.length > 28 ? `${raw.slice(0, 27)}…` : raw;
+}
+
+function renderPinnedBar(): void {
+  if (!pinnedBar || !pinnedChips) return;
+  if (pinnedPaths.length === 0) {
+    pinnedBar.classList.add("hidden");
+    pinnedChips.replaceChildren();
+    return;
+  }
+  pinnedBar.classList.remove("hidden");
+  const fragment = document.createDocumentFragment();
+  for (let index = 0; index < pinnedPaths.length; index += 1) {
+    const path = pinnedPaths[index];
+    const resolvedId = resolveSingleStructuralPath(path);
+    const model = resolvedId !== undefined ? getModel(resolvedId) : undefined;
+    const label = formatPinnedPathLabel(path);
+    const shortVal = formatPinnedShortValue(model);
+
+    const chip = document.createElement("span");
+    chip.className = model ? "pinned-chip" : "pinned-chip missing";
+    chip.setAttribute("data-pin-index", String(index));
+
+    const jumpBtn = document.createElement("button");
+    jumpBtn.type = "button";
+    jumpBtn.className = "pinned-chip-jump";
+    jumpBtn.setAttribute("data-pin-index", String(index));
+    jumpBtn.disabled = model === undefined;
+    jumpBtn.title = model !== undefined ? `${label}: ${shortVal}` : t("Not present in current record");
+
+    const labelSpan = document.createElement("span");
+    labelSpan.className = "pinned-chip-label";
+    labelSpan.textContent = label;
+    const sepText = document.createElement("span");
+    sepText.textContent = ": ";
+    const valSpan = document.createElement("span");
+    valSpan.className = "pinned-chip-value";
+    valSpan.textContent = shortVal;
+    jumpBtn.appendChild(labelSpan);
+    jumpBtn.appendChild(sepText);
+    jumpBtn.appendChild(valSpan);
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "pinned-chip-remove";
+    removeBtn.setAttribute("data-pin-index", String(index));
+    removeBtn.setAttribute("aria-label", t("Unpin field"));
+    removeBtn.title = t("Unpin field");
+    removeBtn.textContent = "×";
+
+    chip.appendChild(jumpBtn);
+    chip.appendChild(removeBtn);
+    fragment.appendChild(chip);
+  }
+  pinnedChips.replaceChildren(fragment);
+}
+
 // Breadcrumb & Keyboard navigation
 
 function buildAncestry(nodeId: number): number[] {
+  if (getModel(nodeId) === undefined) return [];
   const ids: number[] = [];
   let current: number | undefined = nodeId;
   while (current !== undefined) {
     ids.push(current);
-    current = parentById.get(current);
+    current = getParentId(current);
   }
   return ids.reverse();
 }
 
 function updateBreadcrumb(nodeId: number | undefined): void {
   if (!breadcrumbSegments) return;
-  if (nodeId === undefined || !modelById.has(nodeId)) {
+  if (nodeId === undefined || getModel(nodeId) === undefined) {
     breadcrumbSegments.replaceChildren();
     if (breadcrumbCopyJsonPath) breadcrumbCopyJsonPath.disabled = true;
     if (breadcrumbCopyJq) breadcrumbCopyJq.disabled = true;
@@ -1643,7 +2515,7 @@ function updateBreadcrumb(nodeId: number | undefined): void {
   const fragment = document.createDocumentFragment();
   for (let index = 0; index < ancestry.length; index += 1) {
     const id = ancestry[index];
-    const edge = edgeById.get(id);
+    const edge = getEdge(id);
     if (index > 0) {
       const sep = document.createElement("span");
       sep.className = "breadcrumb-sep";
@@ -1654,7 +2526,8 @@ function updateBreadcrumb(nodeId: number | undefined): void {
     button.type = "button";
     button.className = edge?.decoded ? "breadcrumb-segment decoded" : "breadcrumb-segment";
     button.setAttribute("data-node-id", String(id));
-    const parentModel = parentById.get(id) !== undefined ? modelById.get(parentById.get(id)!) : undefined;
+    const parentId = getParentId(id);
+    const parentModel = parentId !== undefined ? getModel(parentId) : undefined;
     const rawLabel = edge?.label ?? "$";
     const text = index === 0
       ? "$"
@@ -1675,7 +2548,10 @@ function focusNodeById(nodeId: number): void {
   for (let index = 0; index < ancestry.length - 1; index += 1) {
     expansion.add(ancestry[index]);
     if (searchActive) searchRevealedIds.add(ancestry[index]);
+    if (currentDiff && diffChangesOnly) diffRevealedIds.add(ancestry[index]);
   }
+  if (searchActive) searchRevealedIds.add(nodeId);
+  if (currentDiff && diffChangesOnly) diffRevealedIds.add(nodeId);
   rebuildVisibleRows();
   setFocusedNode(nodeId, true);
 }
@@ -1703,6 +2579,9 @@ function setFocusedNode(nodeId: number, focus = true): void {
   }
 
   updateBreadcrumb(nodeId);
+  if (inspectorOpen && previousId !== nodeId) {
+    updateInspector(false);
+  }
 }
 
 function handleTreeKeydown(event: KeyboardEvent): void {
@@ -1752,7 +2631,7 @@ function handleTreeKeydown(event: KeyboardEvent): void {
         toggleNodeManually(focusedNodeId);
       } else if (expandable && isExpandedId(focusedNodeId)) {
         const nextRow = visibleRows[currentIndex + 1];
-        if (nextRow && parentById.get(nextRow.id) === focusedNodeId) {
+        if (nextRow && getParentId(nextRow.id) === focusedNodeId) {
           targetId = nextRow.id;
         }
       }
@@ -1761,7 +2640,7 @@ function handleTreeKeydown(event: KeyboardEvent): void {
       if (expandable && isExpandedId(focusedNodeId)) {
         toggleNodeManually(focusedNodeId);
       } else {
-        targetId = parentById.get(focusedNodeId);
+        targetId = getParentId(focusedNodeId);
       }
       break;
     case "Home":
@@ -1799,22 +2678,29 @@ function openKeyboardMenu(nodeId: number): void {
 }
 
 /**
- * Expands the path to a node and highlights it without taking keyboard focus,
- * so following the editor cursor never interrupts typing.
+ * Expands the path to a node and highlights it. By default does not take
+ * keyboard focus so following the editor cursor never interrupts typing;
+ * interactive jumps (table rows, pinned chips) pass `focusTarget = true`.
  */
-function revealNode(ids: number[]): void {
+function revealNode(ids: number[], focusTarget = false): void {
   if (treeOperationRunning) {
     pendingReveal = ids;
     return;
   }
   pendingReveal = undefined;
-  if (!currentRoot || ids.length === 0 || ids[0] !== currentRoot.id || searchActive) return;
+  if (!currentRoot || ids.length === 0 || ids[0] !== currentRoot.id) return;
+  if (searchActive && !focusTarget) return;
 
-  for (let index = 0; index < ids.length - 1; index += 1) {
+  for (let index = 0; index < ids.length; index += 1) {
     const id = ids[index];
-    const model = modelById.get(id);
-    if (model && isExpandableModel(model)) {
-      expandedIds.add(id);
+    if (searchActive) searchRevealedIds.add(id);
+    if (currentDiff && diffChangesOnly) diffRevealedIds.add(id);
+    if (index < ids.length - 1) {
+      const model = getModel(id);
+      if (model && isExpandableModel(model)) {
+        expandedIds.add(id);
+        if (searchActive) searchExpandedIds.add(id);
+      }
     }
   }
   const targetId = ids[ids.length - 1];
@@ -1824,7 +2710,7 @@ function revealNode(ids: number[]): void {
   if (rowIndex !== undefined) {
     ensureRowVisible(rowIndex);
   }
-  setFocusedNode(targetId, false);
+  setFocusedNode(targetId, focusTarget);
   schedulePersist();
 }
 
@@ -1834,10 +2720,10 @@ function showMenu(
   nodeId: number,
   fromKeyboard: boolean,
 ): void {
-  const model = modelById.get(nodeId);
+  const model = getModel(nodeId);
   if (!model) return;
-  const edgeInfo = edgeById.get(nodeId);
-  const parentId = parentById.get(nodeId);
+  const edgeInfo = getEdge(nodeId);
+  const parentId = getParentId(nodeId);
 
   menu.replaceChildren();
   menuOriginId = nodeId;
@@ -1858,9 +2744,16 @@ function showMenu(
     addSeparator();
     addMenuItem(t("Copy raw JSON string (escaped)"), () => vscode.postMessage({ type: "copyRawString", nodeId: model.id }));
     addMenuItem(t("Copy decoded string value"), () => vscode.postMessage({ type: "copyDecodedString", nodeId: model.id }));
+    addMenuItem(t("Inspect value"), () => openInspectorForNode(model.id));
     addSeparator();
   } else {
     addMenuItem(t("Copy value"), () => vscode.postMessage({ type: "copyValue", nodeId: model.id }));
+    addMenuItem(t("Inspect value"), () => openInspectorForNode(model.id));
+  }
+
+  if (parentId !== undefined) {
+    const pinned = isNodePinned(model.id);
+    addMenuItem(pinned ? t("Unpin field") : t("Pin field"), () => togglePinNode(model.id));
   }
 
   if (isExpandableModel(model)) {
@@ -1873,6 +2766,8 @@ function showMenu(
   if (model.type === "object" || model.type === "array") {
     addMenuItem(t("Open subtree as new tree"), () => vscode.postMessage({ type: "openSubtree", nodeId: model.id }));
     addMenuItem(t("Open formatted JSON in new editor"), () => vscode.postMessage({ type: "openFormattedJson", nodeId: model.id }));
+    addMenuItem(t("Compare subtree with clipboard"), () => vscode.postMessage({ type: "diffSubtreeWithClipboard", nodeId: model.id }));
+    addMenuItem(t("Generate types / schema…"), () => vscode.postMessage({ type: "generateTypes", nodeId: model.id }));
     if (
       model.type === "array" &&
       (model.children?.length ?? 0) > 0 &&
@@ -1882,6 +2777,12 @@ function showMenu(
     }
     addSeparator();
   } else if (model.decoded !== undefined) {
+    addMenuItem(t("Compare subtree with clipboard"), () => vscode.postMessage({ type: "diffSubtreeWithClipboard", nodeId: model.id }));
+    addMenuItem(t("Generate types / schema…"), () => vscode.postMessage({ type: "generateTypes", nodeId: model.id }));
+    addSeparator();
+  } else {
+    addMenuItem(t("Compare subtree with clipboard"), () => vscode.postMessage({ type: "diffSubtreeWithClipboard", nodeId: model.id }));
+    addMenuItem(t("Generate types / schema…"), () => vscode.postMessage({ type: "generateTypes", nodeId: model.id }));
     addSeparator();
   }
 
@@ -1952,13 +2853,46 @@ function hideMenu(restoreFocus = false): void {
 
 // Table View
 
+function compareTableCellValues(av: string, bv: string, dir: number): number {
+  if (av === bv) return 0;
+  const aIsNum = STRICT_NUMBER_RE.test(av);
+  const bIsNum = STRICT_NUMBER_RE.test(bv);
+  if (aIsNum && bIsNum) {
+    if (STRICT_INT_RE.test(av) && STRICT_INT_RE.test(bv)) {
+      const ai = BigInt(av);
+      const bi = BigInt(bv);
+      if (ai !== bi) return ai < bi ? -dir : dir;
+      return 0;
+    }
+    const an = Number(av);
+    const bn = Number(bv);
+    if (!Number.isNaN(an) && !Number.isNaN(bn) && an !== bn) {
+      return an < bn ? -dir : dir;
+    }
+    return av < bv ? -dir : dir;
+  }
+  if (aIsNum !== bIsNum) {
+    return aIsNum ? -dir : dir;
+  }
+  return av < bv ? -dir : dir;
+}
+
 function openTableView(table: TableModel): void {
+  clearTimeout(tableFilterTimer);
   currentTable = table;
   tableSortColumn = -1;
   tableSortAsc = true;
+  const flattened = (table as TableModel & { flattened?: boolean }).flattened === true;
+  tableFlatten = flattened;
+  if (tableFlattenButton) {
+    tableFlattenButton.classList.toggle("active", tableFlatten);
+    tableFlattenButton.setAttribute("aria-pressed", String(tableFlatten));
+  }
   if (tableFilterInput) tableFilterInput.value = "";
+  if (tableContainer) tableContainer.scrollTop = 0;
   if (tableTitle) tableTitle.textContent = table.title;
   tree.classList.add("hidden");
+  inspectorDrawer?.classList.add("hidden");
   emptySearch.classList.add("hidden");
   tableView?.classList.remove("hidden");
   renderTableHeader();
@@ -1967,8 +2901,10 @@ function openTableView(table: TableModel): void {
 
 function closeTableView(restoreFocus: boolean): void {
   if (!tableView || tableView.classList.contains("hidden")) return;
+  clearTimeout(tableFilterTimer);
   tableView.classList.add("hidden");
   tree.classList.remove("hidden");
+  if (inspectorOpen) inspectorDrawer?.classList.remove("hidden");
   if (restoreFocus && focusedNodeId !== undefined) {
     setFocusedNode(focusedNodeId, true);
   }
@@ -1996,8 +2932,6 @@ function renderTableHeader(): void {
 
 function renderTableRows(): void {
   if (!dataTable || !currentTable) return;
-  const tbody = dataTable.querySelector("tbody");
-  if (!tbody) return;
 
   const filterNeedle = (tableFilterInput?.value ?? "").trim().toLowerCase();
   const indices: number[] = [];
@@ -2018,13 +2952,8 @@ function renderTableRows(): void {
     indices.sort((a, b) => {
       const av = currentTable!.rows[a].cells[col] ?? "";
       const bv = currentTable!.rows[b].cells[col] ?? "";
-      const an = av.length > 0 ? Number(av) : Number.NaN;
-      const bn = bv.length > 0 ? Number(bv) : Number.NaN;
-      if (!Number.isNaN(an) && !Number.isNaN(bn)) {
-        return an === bn ? a - b : (an - bn) * dir;
-      }
-      if (av === bv) return a - b;
-      return av < bv ? -dir : dir;
+      const cmp = compareTableCellValues(av, bv, dir);
+      return cmp !== 0 ? cmp : a - b;
     });
   }
 
@@ -2033,25 +2962,93 @@ function renderTableRows(): void {
     const base = indices.length === currentTable.rows.length
       ? t("{0} rows", currentTable.rows.length.toLocaleString())
       : t("{0} / {1} rows", indices.length.toLocaleString(), currentTable.rows.length.toLocaleString());
-    tableCount.textContent = currentTable.truncated ? `${base} (${t("truncated")})` : base;
+    if (currentTable.truncated && currentTable.truncatedColumns) {
+      tableCount.textContent = `${base} (${t("rows & columns truncated")})`;
+      tableCount.title = t("Showing first {0} columns", currentTable.columns.length.toLocaleString());
+    } else if (currentTable.truncated) {
+      tableCount.textContent = `${base} (${t("truncated")})`;
+      tableCount.title = "";
+    } else if (currentTable.truncatedColumns) {
+      tableCount.textContent = `${base} (${t("columns truncated")})`;
+      tableCount.title = t("Showing first {0} columns", currentTable.columns.length.toLocaleString());
+    } else {
+      tableCount.textContent = base;
+      tableCount.title = "";
+    }
   }
 
-  const fragment = document.createDocumentFragment();
-  for (const rowIndex of indices) {
-    const row = currentTable.rows[rowIndex];
-    const tr = document.createElement("tr");
-    tr.setAttribute("data-row-index", String(rowIndex));
-    const numTd = document.createElement("td");
-    numTd.className = "table-row-num";
-    numTd.textContent = row.rowLabel;
-    tr.appendChild(numTd);
-    for (const cell of row.cells) {
-      const td = document.createElement("td");
-      td.textContent = cell;
-      td.title = cell;
-      tr.appendChild(td);
+  renderTableViewport(true);
+}
+
+function createTableRowElement(rowIndex: number): HTMLTableRowElement {
+  const row = currentTable!.rows[rowIndex];
+  const tr = document.createElement("tr");
+  tr.setAttribute("data-row-index", String(rowIndex));
+  const numTd = document.createElement("td");
+  numTd.className = "table-row-num";
+  numTd.textContent = row.rowLabel;
+  tr.appendChild(numTd);
+  for (const cell of row.cells) {
+    const td = document.createElement("td");
+    td.textContent = cell;
+    td.title = cell;
+    tr.appendChild(td);
+  }
+  return tr;
+}
+
+function createTableSpacerRow(colSpan: number, heightPx: number): HTMLTableRowElement {
+  const tr = document.createElement("tr");
+  tr.className = "table-spacer-row";
+  tr.setAttribute("aria-hidden", "true");
+  const td = document.createElement("td");
+  td.setAttribute("colspan", String(colSpan));
+  td.style.height = `${heightPx}px`;
+  tr.appendChild(td);
+  return tr;
+}
+
+function renderTableViewport(force: boolean): void {
+  if (!dataTable || !currentTable) return;
+  const tbody = dataTable.querySelector("tbody");
+  if (!tbody) return;
+
+  const total = tableVisibleRowIndices.length;
+  if (total <= TABLE_VIRTUALIZE_THRESHOLD) {
+    tableRenderedStart = 0;
+    tableRenderedEnd = total;
+    const fragment = document.createDocumentFragment();
+    for (const rowIndex of tableVisibleRowIndices) {
+      fragment.appendChild(createTableRowElement(rowIndex));
     }
-    fragment.appendChild(tr);
+    tbody.replaceChildren(fragment);
+    return;
+  }
+
+  const viewportHeight =
+    typeof tableContainer?.clientHeight === "number" && tableContainer.clientHeight > 0
+      ? tableContainer.clientHeight
+      : 600;
+  const scrollTop = Math.max(0, tableContainer?.scrollTop || 0);
+  const firstVisible = Math.floor(scrollTop / TABLE_ROW_HEIGHT);
+  const visibleCount = Math.max(1, Math.ceil(viewportHeight / TABLE_ROW_HEIGHT));
+  const start = Math.min(total, Math.max(0, firstVisible - TABLE_OVERSCAN_ROWS));
+  const end = Math.min(total, firstVisible + visibleCount + TABLE_OVERSCAN_ROWS);
+
+  if (!force && start === tableRenderedStart && end === tableRenderedEnd) return;
+  tableRenderedStart = start;
+  tableRenderedEnd = end;
+
+  const colSpan = currentTable.columns.length + 1;
+  const fragment = document.createDocumentFragment();
+  if (start > 0) {
+    fragment.appendChild(createTableSpacerRow(colSpan, start * TABLE_ROW_HEIGHT));
+  }
+  for (let index = start; index < end; index += 1) {
+    fragment.appendChild(createTableRowElement(tableVisibleRowIndices[index]));
+  }
+  if (end < total) {
+    fragment.appendChild(createTableSpacerRow(colSpan, (total - end) * TABLE_ROW_HEIGHT));
   }
   tbody.replaceChildren(fragment);
 }
@@ -2111,31 +3108,8 @@ function captureViewByStructure(): { expandedPaths: WebviewPathStep[][]; scrollT
 function resolveStructuralPaths(paths: WebviewPathStep[][]): number[] {
   const ids: number[] = [];
   for (const path of paths) {
-    let model: JsonTreeWebviewNode | undefined = currentRoot;
-    for (const step of path) {
-      if (step === "decoded") {
-        model = model?.decoded?.root;
-      } else if (typeof step === "number") {
-        model = model?.children?.[step]?.value;
-      } else if (model?.type === "object" && model.children !== undefined) {
-        let seen = 0;
-        let found: JsonTreeWebviewNode | undefined;
-        for (const child of model.children) {
-          if (String(child.key) === step.key) {
-            if (seen === step.occurrence) {
-              found = child.value;
-              break;
-            }
-            seen += 1;
-          }
-        }
-        model = found;
-      } else {
-        model = undefined;
-      }
-      if (model === undefined) break;
-    }
-    if (model !== undefined) ids.push(model.id);
+    const resolved = resolveSingleStructuralPath(path);
+    if (resolved !== undefined) ids.push(resolved);
   }
   return ids;
 }
@@ -2152,14 +3126,28 @@ function schedulePersist(): void {
   persistScheduled = true;
   setTimeout(() => {
     persistScheduled = false;
-    vscode.setState?.({
+    const state: SavedViewState = {
       renderKey,
       expanded: [...expandedIds],
       query: searchInput.value,
       scrollTop: tree.scrollTop,
       searchDecoded,
+      searchCaseSensitive,
+      searchRegex,
+      searchScope,
       sortKeys,
-    } satisfies SavedViewState);
+      ...(pinnedPaths.length > 0 ? { pinnedPaths } : {}),
+      ...(inspectorOpen ? { inspectorOpen, inspectorWrap } : {}),
+      ...(currentPanelSource !== undefined
+        ? {
+            panelSource: currentPanelSource,
+            kind: currentPanelSource.kind,
+            uri: currentPanelSource.uri,
+            ...(currentPanelSource.lineNumber !== undefined ? { lineNumber: currentPanelSource.lineNumber } : {}),
+          }
+        : {}),
+    };
+    vscode.setState?.(state);
   }, 250);
 }
 
