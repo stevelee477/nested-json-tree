@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.11.0
+
+- Extended inline decoding to support **Gzip, Zlib, and Deflate-compressed Base64 / Base64URL** payloads (safely capped at 4 MiB decompressed output and decoded as JSON, Protobuf wire format, or readable UTF-8 text), **percent-encoded JSON** (`%7B%22…%7D` / `%5B…%5D`), relative URLs with query strings (`/api/v1/items?a=1&b=2`), custom URI schemes (`ws://`, `wss://`, `grpc://`, `app://`), and standalone query strings (`a=1&b=2&c=3`).
+- Added **Cross-decoded structural JSON Tree Diff** (**Diff Clipboard**, **Compare subtree with clipboard**, and JSONL **Diff Prev**) with `+added`, `-removed`, and `~changed` (`old → new`) badges, a **Changes only** filter, and automatic inner diffing across escaped JSON strings.
+- Added multi-language **Generate types / schema…** for any object, array, or decoded string node, emitting **TypeScript Interfaces**, **JSON Schema (Draft 2020-12)**, **Zod Schemas**, **Go Structs**, or **Python Pydantic** models to a new editor or the clipboard.
+- Added a **Value Inspector** drawer (untruncated Host-side value, path, UTF-8 byte/line/character counts, word-wrap toggle, and one-click copy) and **Pinned Watch** fields (`path: value` chips preserved across live refreshes, panel revivals, and JSONL record navigation).
+- Enhanced search and **Table view**: added **Match case (`Aa`)**, **Regex (`.*`)**, **Scope (`All` / `Keys` / `Values`)**, and **structured field comparisons** (`status>=400`, `env!=prod`, `level=error latency>100`); added **Flatten** nested objects into dot-separated columns, lossless 64-bit `BigInt` numeric sorting, click-to-jump during active search, and **TSV / Markdown** copy alongside CSV.
+- Improved VS Code integration: added **Explorer context-menu** support (`.json`, `.jsonc`, `.jsonl`, `.ndjson`, `.log`), `jsonl` language-mode menu matching, `Alt+Cmd+J` / `Alt+Ctrl+J` shortcuts, and `WebviewPanelSerializer` restoration so open document and JSONL Tree Views revive with their expanded paths, pins, search options, and scroll position across window reloads.
+- Improved large-tree, JSONL, and Webview performance: sped up JSONL record pre-filtering on lines with JSON escapes, added worker-thread `parseNestedJsonCandidatesAsync` with automatic idle worker cleanup, bounded large-tree Base64/Protobuf sniffing, and replaced Webview `Map` indexing and per-scroll DOM rebuilds with dense typed-array indexing, pooled virtual-row recycling, and virtualized **Table view** rendering.
+
 ## 0.10.0
 
 - Improved large-document performance and responsiveness: added a single-pass iterative JSONC parser, reusable `worker_threads` parsing for documents at or above 250,000 characters (`out/parseWorker.js`), Webview virtual scrolling with single-container event delegation (raising the **Expand all** limit to 100,000 nodes), zero-AST Protobuf wire prechecks with packed repeated varint decoding, `O(n)` Base64 syntax/trailing-bit validation with slug filtering, `WeakMap` decodable detection caching, iterative subtree cloning, and minified production builds (`compile:prod` / `vscode:prepublish`).
